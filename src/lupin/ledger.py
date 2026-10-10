@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from datetime import datetime, timezone
 
 import redis
@@ -131,11 +132,14 @@ def read_events(
     redis_username: str | None = None,
     redis_password: str | None = None,
 ) -> list[dict]:
-    """Return the latest `limit` events, oldest first.
+    """Return up to `limit` events, oldest first.
 
     `limit` defaults to 10 and must be positive. Pass `None` to read the full
     stream. An empty stream returns an empty list. Raises
-    `CoordinatorUnreachable` when Redis cannot be reached.
+    `CoordinatorUnreachable` when Redis cannot be reached. read_events skips
+    only a bad entry: a Redis entry whose fields `_decode` cannot read. A bad
+    entry cannot be decoded. The entry still counts toward `limit`.
+    read_events writes its Redis entry ID to stderr.
     """
     key = _stream_key(repo)
     if limit is not None and (
@@ -152,4 +156,14 @@ def read_events(
         raise CoordinatorUnreachable(repo) from exc
     if limit is not None:
         entries = reversed(entries)
-    return [_decode(stream_id, fields) for stream_id, fields in entries]
+    records = []
+    for stream_id, fields in entries:
+        try:
+            records.append(_decode(stream_id, fields))
+        except (KeyError, ValueError, RecursionError) as exc:
+            print(
+                f"ledger: skipped bad entry {stream_id}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+    return records
