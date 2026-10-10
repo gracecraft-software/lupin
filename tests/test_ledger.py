@@ -104,6 +104,25 @@ def test_read_of_empty_ledger_returns_no_events(connection):
     assert ledger.read_events("acme/empty", **connection) == []
 
 
+def test_read_skips_bad_entry_and_reports_it_once(connection, capsys):
+    first = ledger.append_event(
+        "acme/repo", {"event": "work", "issue": 1}, **connection
+    )
+    bad_id = ledger._client(**connection).xadd(
+        ledger._stream_key("acme/repo"),
+        {
+            "ts": "2026-10-10T00:00:00Z", "host": "machine-a",
+            "event": "work", "highlights": "not json",
+        },
+    )
+    last = ledger.append_event("acme/repo", {"event": "work", "issue": 2}, **connection)
+
+    events = ledger.read_events("acme/repo", **connection)
+
+    assert events == [first, last]
+    assert capsys.readouterr().err.count(bad_id) == 1
+
+
 def test_append_and_read_report_unavailable_coordinator(closed_port):
     connection = {"redis_host": "127.0.0.1", "redis_port": closed_port}
 
