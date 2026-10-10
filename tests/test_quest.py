@@ -1235,7 +1235,7 @@ def test_release_raises_coordinator_unreachable(quests_fixture, closed_port):
 # --------------------------------------------------------------------------
 
 
-def test_cli_quest_focus_prints_exact_copy_text(quests_fixture, monkeypatch, redis_port, flush_redis, capsys):
+def test_cli_quest_focus_prints_exact_copy_text(quests_fixture, monkeypatch, redis_port, flush_redis, capsys, clean_lupin_env):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo"])
     monkeypatch.setattr(
         cli.machines, "machines", lambda connection: [_machine("mac-studio", used=0, max_=4)]
@@ -1290,7 +1290,7 @@ def test_cli_quest_focus_no_ready_tasks_error(monkeypatch, redis_port, flush_red
     )
 
 
-def test_cli_quest_release_prints_exact_copy_text(quests_fixture, redis_port, flush_redis, capsys):
+def test_cli_quest_release_prints_exact_copy_text(quests_fixture, redis_port, flush_redis, capsys, clean_lupin_env):
     quest.write_focus("session-rewrite", "mac-studio", pinned=False, **_kw(redis_port))
 
     code = cli.main(
@@ -1302,7 +1302,7 @@ def test_cli_quest_release_prints_exact_copy_text(quests_fixture, redis_port, fl
     assert captured.out.strip() == "released session-rewrite · mac-studio returns to normal routing"
 
 
-def test_cli_quest_release_no_focus_error(quests_fixture, redis_port, flush_redis, capsys):
+def test_cli_quest_release_no_focus_error(quests_fixture, redis_port, flush_redis, capsys, clean_lupin_env):
     code = cli.main(
         ["quest", "release", "session-rewrite", "--redis-host", "127.0.0.1", "--redis-port", str(redis_port)]
     )

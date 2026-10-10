@@ -20,7 +20,7 @@ import pytest
 from lupin import cli, slots
 
 
-def test_acquire_respects_max_third_call_is_full(tmp_path):
+def test_acquire_respects_max_third_call_is_full(tmp_path, clean_lupin_env):
     root = str(tmp_path)
     assert cli.main(["acquire", "bmo", "--holder", "a", "--max", "2", "--state-root", root]) == 0
     assert cli.main(["acquire", "bmo", "--holder", "b", "--state-root", root]) == 0
@@ -64,7 +64,7 @@ def test_release_malformed_lease_id_is_an_error(tmp_path):
     assert code == 1
 
 
-def test_status_json_reports_accurate_counts(tmp_path, capsys):
+def test_status_json_reports_accurate_counts(tmp_path, capsys, clean_lupin_env):
     root = str(tmp_path)
     cli.main(["acquire", "bmo", "--holder", "a", "--max", "2", "--state-root", root])
     cli.main(["acquire", "bmo", "--holder", "b", "--state-root", root])
