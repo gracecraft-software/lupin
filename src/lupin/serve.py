@@ -451,9 +451,12 @@ def fleet_state(connection: dict) -> dict:
     short names, `roadmap._repo_identity()` to resolve each one's GitHub
     owner from its local checkout. A repo with no local checkout (or no
     `gh` access) is silently skipped, same as `/roadmap` already tolerates.
+
+    Reads are strict: an unreadable machine or claim record raises. The
+    dashboard never shows a partial fleet.
     """
     try:
-        machine_list = machines.machines(connection)
+        machine_list = machines.machines(connection, strict=True)
     except machines.CoordinatorUnreachable as exc:
         return {"machines": [], "claims": {}, "fleet_error": str(exc)}
 
@@ -472,6 +475,7 @@ def fleet_state(connection: dict) -> dict:
                 redis_port=connection.get("redis_port"),
                 redis_username=connection.get("redis_username"),
                 redis_password=connection.get("redis_password"),
+                strict=True,
             )
         except claims.CoordinatorUnreachable:
             pass
@@ -2886,13 +2890,17 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_dashboard(gather(self.peek_lines, self.fleet_connection)))
         elif url.path == "/roadmap":
             try:
-                machine_records = machines.machines(self.fleet_connection)
+                machine_skipped: list[str] = []
+                machine_records = machines.machines(self.fleet_connection, machine_skipped, strict=False)
                 online = sum(record.get("state") == "online" for record in machine_records)
                 fleet_html = (
                     "<a class='machine-count' href='/machines' style='display:flex;align-items:center;gap:6px'>"
                     f"<span class='machine-dot {'online' if online == len(machine_records) else ''}'></span>"
                     f"{online} of {len(machine_records)} machines</a>"
                 )
+                warning = roadmap.skipped_warning(machine_skipped)
+                if warning:
+                    fleet_html += f"<span class='machine-count'>{html.escape(warning)}</span>"
             except machines.CoordinatorUnreachable:
                 fleet_html = "<span class='machine-count'>Machine status unavailable</span>"
             recurring = next((row for row in timers() if row["unit"] == "delegation-loop.timer"), None)
@@ -2966,7 +2974,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_model_tiers(sent=query.get("sent"), connection=self.fleet_connection))
         elif url.path == "/machines":
             try:
-                records = machines.machines(self.fleet_connection)
+                records = machines.machines(self.fleet_connection, strict=True)
                 slot_status = slots_redis.status(**self.fleet_connection)
                 timer_list = timers()
                 recurring_timer = next(
@@ -3076,7 +3084,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("bad remote repo enable request"), 400)
             return
         try:
-            records = machines.machines(self.fleet_connection)
+            # strict: do not send a command based on a partial machine list.
+            records = machines.machines(self.fleet_connection, strict=True)
         except CoordinatorUnreachable:
             self.reply(render_error("cannot reach the redis coordinator"), 502)
             return
@@ -3468,7 +3477,8 @@ class Handler(BaseHTTPRequestHandler):
 
         local_host = machines.hostname()
         try:
-            records = machines.machines(self.fleet_connection)
+            # strict: do not place runs on a partial machine list.
+            records = machines.machines(self.fleet_connection, strict=True)
         except CoordinatorUnreachable:
             records = []
 
@@ -3596,6 +3606,8 @@ class Handler(BaseHTTPRequestHandler):
         merged). Returns `None` if there's no id, no such quest, or Redis
         can't be reached -- the roadmap page just skips the progress card
         in that case rather than failing the whole (read-only) page.
+        An unreadable claim record is left out and listed in `skipped`, so
+        the card can warn.
         """
         if not quest_id:
             return None
@@ -3607,8 +3619,13 @@ class Handler(BaseHTTPRequestHandler):
             return None
         targets = record.get("targets", [])
         owner_repos = sorted({target.rpartition("#")[0] for target in targets})
+        claim_skipped: list[str] = []
         try:
-            held = claims.claims_for(owner_repos, **self.fleet_connection) if owner_repos else {}
+            held = (
+                claims.claims_for(owner_repos, skipped=claim_skipped, **self.fleet_connection)
+                if owner_repos
+                else {}
+            )
         except CoordinatorUnreachable:
             held = {}
         holder = f"quest:{quest_id}"
@@ -3625,6 +3642,7 @@ class Handler(BaseHTTPRequestHandler):
             "pending": pending,
             "done": done,
             "total": len(record.get("issues", [])),
+            "skipped": sorted(claim_skipped),
         }
 
     def do_POST(self):  # noqa: N802

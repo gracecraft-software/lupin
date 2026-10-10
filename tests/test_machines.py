@@ -275,6 +275,39 @@ def test_machines_reports_version_mismatch_without_raising(redis_port, flush_red
     assert result[0]["version"] == "9.9.9-nonexistent"
 
 
+def test_machines_leaves_out_unreadable_records_and_reports_them(redis_port, flush_redis):
+    _write_raw_record(redis_port, "good-box")
+    raw = _raw_client(redis_port)
+    raw.set("lupin:v1:machine:old-box", "not json")
+    raw.set("lupin:v1:machine:list-box", "[]")
+    raw.set("lupin:v1:machine:ralpha", json.dumps({"name": "ralpha", "state": "online"}))
+    raw.set("lupin:v1:machine:bad-time", json.dumps({"state": "online", "heartbeat": "yesterday"}))
+    skipped = []
+
+    result = machines.machines(_kw(redis_port), skipped=skipped, strict=False)
+
+    assert [m["name"] for m in result] == ["good-box"]
+    assert sorted(skipped) == [
+        "machine:bad-time", "machine:list-box", "machine:old-box", "machine:ralpha",
+    ]
+
+
+def test_machines_raises_on_unreadable_record_by_default(redis_port, flush_redis):
+    _write_raw_record(redis_port, "good-box")
+    _raw_client(redis_port).set("lupin:v1:machine:old-box", "not json")
+
+    with pytest.raises(json.JSONDecodeError):
+        machines.machines(_kw(redis_port))
+
+
+def test_machines_strict_raises_on_unreadable_record(redis_port, flush_redis):
+    _write_raw_record(redis_port, "good-box")
+    _raw_client(redis_port).set("lupin:v1:machine:old-box", "not json")
+
+    with pytest.raises(json.JSONDecodeError):
+        machines.machines(_kw(redis_port), strict=True)
+
+
 def test_unreachable_redis_raises_coordinator_unreachable(closed_port):
     kw = {"redis_host": "127.0.0.1", "redis_port": closed_port}
     with pytest.raises(machines.CoordinatorUnreachable):

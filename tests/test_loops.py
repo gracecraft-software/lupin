@@ -12,6 +12,7 @@ import json
 from unittest import mock
 
 import pytest
+import redis as redis_lib
 
 from lupin import commands, loops, machines
 
@@ -54,6 +55,22 @@ def test_resolve_machine_for_repo_lets_coordinator_unreachable_propagate():
     with mock.patch.object(machines, "machines", side_effect=machines.CoordinatorUnreachable("x")):
         with pytest.raises(machines.CoordinatorUnreachable):
             loops.resolve_machine_for_repo("widgets", {})
+
+
+def test_resolve_machine_for_repo_refuses_a_partly_read_registry(redis_port, flush_redis):
+    """A corrupt record must stop the pick. Skipping it would pick from a
+    partial list."""
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port)
+    raw.set("lupin:v1:machine:old-box", "not json")
+    raw.set("lupin:v1:machine:jesus", json.dumps({
+        "name": "jesus", "heartbeat": machines._now_iso(), "state": "online",
+        "loops": [{"repo": "widgets"}],
+    }))
+
+    with pytest.raises(json.JSONDecodeError):
+        loops.resolve_machine_for_repo(
+            "widgets", {"redis_host": "127.0.0.1", "redis_port": redis_port}
+        )
 
 
 # --------------------------------------------------------------------------

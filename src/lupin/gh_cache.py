@@ -103,7 +103,7 @@ def _canonical_fetcher_live(connection: dict) -> bool:
     the original behaviour rather than starting a fetch it cannot justify.
     """
     try:
-        records = {record["name"]: record for record in machines.machines(connection)}
+        records = {record["name"]: record for record in machines.machines(connection, strict=True)}
     except Exception:
         return True
     record = records.get(CANONICAL_GH_FETCHER)

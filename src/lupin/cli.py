@@ -341,7 +341,7 @@ def _ledger_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _roadmap_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--repo", default=None, help="only this repo (default: every enabled repo)")
+    parser.add_argument("--repo", default=None, help="only this repo (default: every repo that any machine enables)")
     parser.add_argument("--limit", type=int, default=10, help="show the top N (default: 10)")
     parser.add_argument("--stage", choices=["ready", "blocked", "all"], default="ready")
     parser.add_argument("--dag", action="store_true", help="draw dependencies between tasks")
@@ -953,6 +953,13 @@ def _fleet_connection(args: argparse.Namespace) -> dict:
     )
 
 
+def _warn_unreadable(skipped: list[str]) -> None:
+    """Name the machine records a display command left out."""
+    if skipped:
+        names = ", ".join(sorted(skipped))
+        print(f"warning: skipped unreadable Redis record(s): {names}", file=sys.stderr)
+
+
 def _cmd_join(args: argparse.Namespace) -> int:
     try:
         record = machines.join(
@@ -1005,11 +1012,13 @@ def _cmd_undrain(args: argparse.Namespace) -> int:
 
 
 def _cmd_machines(args: argparse.Namespace) -> int:
+    skipped: list[str] = []
     try:
-        result = machines.machines(_fleet_connection(args))
+        result = machines.machines(_fleet_connection(args), skipped, strict=False)
     except machines.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
         return 3
+    _warn_unreadable(skipped)
     if args.json:
         print(json.dumps(result))
     else:
@@ -1299,11 +1308,18 @@ def _cmd_roadmap(args: argparse.Namespace) -> int:
     # which has no such flag, and `resolve_connection` falls back to the
     # same default fleet config every other reader uses.
     connection = machines.resolve_connection(**_claim_kwargs(args))
-    claims_lookup = functools.partial(claims.claims_for, **connection)
+    # Records that `machines` or `claims` skipped. `run` reports the count.
+    unreadable: list[str] = []
+    claims_lookup = functools.partial(
+        claims.claims_for, with_ttl=True, skipped=unreadable, **connection
+    )
     text, code = roadmap_cli.run(
         args.repo, args.limit, args.stage, args.dag, args.json, args.refresh,
         claims_lookup=claims_lookup,
         connection=connection,
+        code_dir=os.environ.get("LUPIN_LOOP_CODE_DIR", "/code"),
+        machine_records=functools.partial(machines.machines, connection, skipped=unreadable, strict=False),
+        unreadable=unreadable,
     )
     print(text)
     return code
@@ -1532,7 +1548,7 @@ def _cmd_fleet_run(args: argparse.Namespace) -> int:
             print("no enabled repos to dispatch", file=sys.stderr)
             return 1
         connection = _fleet_connection(args)
-        records = machines.machines(connection)
+        records = machines.machines(connection, strict=True)
         signing_keys = {}
         key_dir = os.environ.get("LUPIN_CMD_SIGNING_KEYS_DIR")
         for record in records:
@@ -1664,11 +1680,13 @@ def _cmd_loops(args: argparse.Namespace) -> int:
             print("remote loop state returned invalid JSON", file=sys.stderr)
             return 1
     else:
+        skipped: list[str] = []
         try:
-            records = machines.machines(_fleet_connection(args))
+            records = machines.machines(_fleet_connection(args), skipped, strict=False)
         except machines.CoordinatorUnreachable as exc:
             print(f"cannot reach the {exc}", file=sys.stderr)
             return 3
+        _warn_unreadable(skipped)
         record = next((item for item in records if item["name"] == machine), None)
         if record is None:
             print(f"no machine named {machine!r}", file=sys.stderr)
@@ -1878,7 +1896,7 @@ def _cmd_pause_resume(args: argparse.Namespace, verb: str) -> int:
     local_host = machines.hostname()
     if args.all:
         try:
-            targets = sorted(record["name"] for record in machines.machines(connection))
+            targets = sorted(record["name"] for record in machines.machines(connection, strict=True))
         except machines.CoordinatorUnreachable as exc:
             print(f"cannot reach the {exc}", file=sys.stderr)
             return 3

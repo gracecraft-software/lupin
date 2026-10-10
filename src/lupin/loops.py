@@ -63,7 +63,7 @@ def resolve_machine_for_repo(repo: str, connection: dict) -> str:
     registry itself cannot be reached -- that is a different problem
     from "no match found", so this function does not swallow it.
     """
-    records = machines.machines(connection)
+    records = machines.machines(connection, strict=True)
     candidates = [
         record["name"]
         for record in records

@@ -201,6 +201,25 @@ def release_claim(
     return bool(result)
 
 
+def _get_with_ttl(client, key: str) -> tuple[str | None, int]:
+    """The value and the milliseconds left, read in one Redis round trip so
+    the two always describe the same claim.
+    """
+    pipe = client.pipeline()
+    pipe.get(key)
+    pipe.pttl(key)
+    return tuple(pipe.execute())
+
+
+def _claim_object(raw: str) -> dict | None:
+    """The claim, or None if `raw` is not a JSON object."""
+    try:
+        claim = json.loads(raw)
+    except ValueError:
+        return None
+    return claim if isinstance(claim, dict) else None
+
+
 def claims_for(
     repos: list[str],
     *,
@@ -208,10 +227,23 @@ def claims_for(
     redis_port: int | None = None,
     redis_username: str | None = None,
     redis_password: str | None = None,
+    with_ttl: bool = False,
+    skipped: list[str] | None = None,
+    strict: bool = False,
 ) -> dict[str, dict]:
     """Return `{"<owner>/<repo>#<n>": {"host", "session", "since"}}` for
     every currently-claimed issue in `repos` (each an `"<owner>/<repo>"`
     string, no issue number).
+
+    With `with_ttl=True`, each value also has `"ttl"`: the seconds Redis
+    still holds the claim. It is `None` if the key has no expiry.
+
+    `strict=True` raises for a claim that is not a JSON object. Acting
+    callers use it. A malformed claim raises `json.JSONDecodeError`, which
+    is a `ValueError`.
+
+    `strict=False` (the default) leaves such a claim out. Its
+    `claim:<target>` label is added to `skipped` when `skipped` is a list.
 
     The integration point future `roadmap` (#10) and `quest` (#11) commands
     import to find out which of their issues are off-limits -- pass the
@@ -231,10 +263,25 @@ def claims_for(
             owner_repo, _sep, _number = target.rpartition("#")
             if owner_repo not in repos:
                 continue
-            raw = _call_with_retry(lambda k=key: client.get(k))
+            if with_ttl:
+                raw, ttl_ms = _call_with_retry(lambda k=key: _get_with_ttl(client, k))
+            else:
+                raw = _call_with_retry(lambda k=key: client.get(k))
             if raw is None:
                 continue
-            result[target] = json.loads(raw)
+            if strict:
+                claim = json.loads(raw)
+                if not isinstance(claim, dict):
+                    raise ValueError(f"claim:{target} is not a JSON object")
+            else:
+                claim = _claim_object(raw)
+                if claim is None:
+                    if skipped is not None:
+                        skipped.append(f"claim:{target}")
+                    continue
+            if with_ttl:
+                claim["ttl"] = ttl_ms / 1000 if ttl_ms >= 0 else None
+            result[target] = claim
         return result
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable("claims_for") from exc

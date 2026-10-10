@@ -201,6 +201,18 @@ def test_place_has_no_pick_when_every_matching_machine_is_draining(redis_port, f
     assert result["candidates"][0]["result"] == "draining"
 
 
+def test_place_raises_on_an_unreadable_machine_record_by_default(redis_port, flush_redis):
+    """`place` callers act on the pick. A pick made from a partial list is
+    not safe, so the default must raise."""
+    _write_machine(redis_port, "mac-studio", slots={"bmo": {"used": 0, "max": 2}}, quota=_CLAUDE_QUOTA)
+    redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True).set(
+        f"{machines.PREFIX}machine:old-box", "not json"
+    )
+
+    with pytest.raises(json.JSONDecodeError):
+        place.place("retry backoff", _kw(redis_port))
+
+
 def test_place_skips_machines_running_a_different_provider(redis_port, flush_redis):
     _write_machine(redis_port, "mac-studio", quota=_CLAUDE_QUOTA)
     _write_machine(redis_port, "codex-box", quota={"openai": {"pct_left": 80.0, "resets_at": None, "source": "test"}})

@@ -1857,6 +1857,14 @@ def render_combined_page(repos: list[str], models: dict, page_fn, query=None, qu
     body, css = board_fragment(repos, models, query, quest_state)
     return page_fn("Roadmap", body, css, "")
 
+
+def skipped_warning(skipped: list[str]) -> str:
+    """Warning text for the registry records a display read left out. Empty if none."""
+    if not skipped:
+        return ""
+    return f"warning: skipped unreadable Redis record(s): {', '.join(sorted(skipped))}"
+
+
 def _render_quest_section(repo: str | None, quest_state: dict | None) -> str:
     """The quest card: a "Start quest" button that submits whichever issue
     checkboxes (rendered elsewhere, via `form=quest-start`) are ticked, and,
@@ -1888,7 +1896,11 @@ def _render_quest_section(repo: str | None, quest_state: dict | None) -> str:
         f"<input type=hidden name=id value='{_escape_attr(quest_state['id'])}'>"
         "<button type='submit'>Stop quest</button></form>"
     )
-    return f"<div class='card'><h2>Quest</h2>{progress}{stop_form}{start_form}</div>"
+    warning = skipped_warning(quest_state.get("skipped", []))
+    warning_html = (
+        f"<p class='dim'>{_escape_attr(warning)}. Progress may be wrong.</p>" if warning else ""
+    )
+    return f"<div class='card'><h2>Quest</h2>{progress}{warning_html}{stop_form}{start_form}</div>"
 
 
 def render_page(

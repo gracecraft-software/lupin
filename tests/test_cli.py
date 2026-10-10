@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+import redis as redis_lib
 
 from lupin import cli, commands, loop_runtime, loops, machines, slots
 
@@ -101,7 +102,7 @@ def test_fleet_run_uses_only_per_machine_signing_keys(monkeypatch, tmp_path, cap
         lambda: {"widgets": ["opencode-go/step-5-preview-free:xhigh"]},
     )
     monkeypatch.setattr(machines, "hostname", lambda: "pihome")
-    monkeypatch.setattr(machines, "machines", lambda connection: [{"name": "jesus"}, {"name": "ralpha"}])
+    monkeypatch.setattr(machines, "machines", lambda connection, **kwargs: [{"name": "jesus"}, {"name": "ralpha"}])
     monkeypatch.setattr(cli, "_fleet_connection", lambda args: {"redis_host": "redis"})
     dispatched = {}
 
@@ -142,7 +143,7 @@ def test_fleet_run_queues_signed_run_to_worker(redis_port, flush_redis, monkeypa
     monkeypatch.setenv("LUPIN_CMD_SIGNING_KEY", "shared-secret")
     monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
     monkeypatch.setattr(machines, "hostname", lambda: "pihome")
-    monkeypatch.setattr(machines, "machines", lambda connection: records)
+    monkeypatch.setattr(machines, "machines", lambda connection, **kwargs: records)
     monkeypatch.setattr(cli, "_fleet_connection", lambda args: connection)
 
     assert cli.main(["fleet-run", "--json"]) == 0
@@ -528,6 +529,70 @@ def test_schedule_defaults_machine_to_local_host():
     ) as dispatch:
         cli.main(["schedule"])
     assert dispatch.call_args.kwargs["machine"] == "h"
+
+
+# --------------------------------------------------------------------------
+# Unreadable machine records: acting commands stop, display commands warn.
+# --------------------------------------------------------------------------
+
+
+def _fleet_with_corrupt_record(redis_port, tmp_path):
+    """One readable machine (`good-box`) and one corrupt record (`old-box`).
+    Returns the connection flags for `cli.main`. `--config-path` keeps the
+    machine's real fleet config (which may set a Redis username) out of it."""
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port)
+    raw.set("lupin:v1:machine:old-box", "not json")
+    raw.set("lupin:v1:machine:good-box", json.dumps({
+        "version": "0.0.0+dev", "heartbeat": machines._now_iso(), "state": "online",
+        "slots": {}, "providers": [], "quota": {}, "loops": [{"repo": "widgets"}],
+    }))
+    return [
+        "--redis-host", "127.0.0.1", "--redis-port", str(redis_port),
+        "--config-path", str(tmp_path / "fleet.json"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("argv", "dispatch_name"),
+    [
+        (["pause", "--all"], "dispatch_loop_action"),
+        (["resume", "--all"], "dispatch_loop_action"),
+        (["fleet-run"], "dispatch_fleet_runs"),
+    ],
+)
+def test_acting_commands_stop_on_an_unreadable_machine_record(
+    redis_port, flush_redis, monkeypatch, tmp_path, argv, dispatch_name
+):
+    redis_args = _fleet_with_corrupt_record(redis_port, tmp_path)
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: ["widgets"])
+    dispatch = mock.Mock(
+        name=dispatch_name,
+        side_effect=AssertionError("acted on a partly read machine registry"),
+    )
+    monkeypatch.setattr(loops, dispatch_name, dispatch)
+
+    with pytest.raises(json.JSONDecodeError):
+        cli.main([*argv, *redis_args])
+
+    dispatch.assert_not_called()
+
+
+def test_machines_command_warns_and_skips_an_unreadable_record(redis_port, flush_redis, tmp_path, capsys):
+    redis_args = _fleet_with_corrupt_record(redis_port, tmp_path)
+
+    assert cli.main(["machines", "--json", *redis_args]) == 0
+
+    captured = capsys.readouterr()
+    assert [m["name"] for m in json.loads(captured.out)] == ["good-box"]
+    assert "machine:old-box" in captured.err
+
+
+def test_loops_command_warns_when_the_machine_record_is_unreadable(redis_port, flush_redis, tmp_path, capsys):
+    redis_args = _fleet_with_corrupt_record(redis_port, tmp_path)
+
+    assert cli.main(["loops", "--machine", "old-box", *redis_args]) == 1
+
+    assert "machine:old-box" in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------

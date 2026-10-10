@@ -23,6 +23,13 @@ one illustrative example, not a full algorithm:
   (it also shows done/waiting). Telling "waiting" (blocked, but about to
   clear) from "blocked" (stuck) needs quest/closed-issue data this issue
   doesn't have yet -- three honest states beat five guessed ones.
+- Without `--repo`, the repos are the ones this machine enables, plus the
+  ones other machines enable in the machine registry (`fleet_repos`). This
+  machine reads a repo only through its own checkout. A repo with no
+  checkout gets a warning that names it.
+- `--json` has a `claims` array: every active claim in the repos shown.
+  `--dag --json` has no claims. Claim TTLs come from
+  `claims.claims_for(with_ttl=True)`.
 - Quest grouping (the mockup's "quest session-rewrite · 2 of 5 done" line)
   is issue #11's data. `_quest_for` is the hook: it always returns None
   today, so every node renders in one ungrouped list. #11 fills it in.
@@ -30,12 +37,15 @@ one illustrative example, not a full algorithm:
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
+import time
 
 from . import claims
 from . import gh_cache
+from . import machines
 from . import roadmap
 from .slots import CoordinatorUnreachable
 
@@ -97,15 +107,18 @@ def build_roadmap(
     repos: list[str],
     code_dir: str = roadmap.CODE_DIR,
     refresh: bool = False,
-    claims_lookup=claims.claims_for,
+    claims_lookup=functools.partial(claims.claims_for, strict=True),
     connection: dict | None = None,
 ) -> dict:
     """Fetch open issues and the dependency DAG for `repos`, mark claimed
     issues, and compute each issue's status.
 
-    Returns {"repos": {repo: [node, ...]}, "cycles": [...], "warnings": [...]}.
+    Returns {"repos": {repo: [node, ...]}, "cycles": [...], "warnings": [...],
+    "claims": [...]}.
     Each node: number, title, priority, status (ready/blocked/claimed),
     claimedBy (session string or None), blockedBy (resolved open blockers).
+    Each claim: target, host, holder, age_seconds, ttl_seconds. It lists
+    every active claim in `repos`, also for an issue that is no longer open.
 
     `connection` reaches the shared `gh` cache, which owns the fleet Redis
     location itself when it is None (see `gh_cache._resolve`).
@@ -146,6 +159,8 @@ def build_roadmap(
 
     full_names = {repo: f"{owners[repo]}/{repo}" for repo in repos if owners.get(repo)}
     claimed_sessions: dict[tuple[str, int], str] = {}
+    claim_rows: list[dict] = []
+    now = _now()
     if full_names:
         try:
             raw_claims = claims_lookup(list(full_names.values()))
@@ -158,6 +173,7 @@ def build_roadmap(
             repo = name_to_repo.get(owner_repo)
             if repo and number_text.isdigit():
                 claimed_sessions[(repo, int(number_text))] = info.get("session", "")
+                claim_rows.append(_claim_row(target, info, now))
 
     existence_cache: dict[tuple[str, int], str | None] = {}
     nodes_by_repo: dict[str, list[dict]] = {}
@@ -207,7 +223,36 @@ def build_roadmap(
             )
         nodes_by_repo[repo] = nodes
 
-    return {"repos": nodes_by_repo, "cycles": dag.get("cycles", []), "warnings": warnings}
+    return {
+        "repos": nodes_by_repo,
+        "cycles": dag.get("cycles", []),
+        "warnings": warnings,
+        "claims": sorted(claim_rows, key=_claim_sort_key),
+    }
+
+
+def _now() -> float:
+    """Wall clock for claim ages. Tests patch this, not `time.time`."""
+    return time.time()
+
+
+def _claim_row(target: str, info: dict, now: float) -> dict:
+    """One active claim for the JSON output. `holder` is the claim's
+    `session` field. A missing `since` or `ttl` gives `None`."""
+    since = info.get("since")
+    ttl = info.get("ttl")
+    return {
+        "target": target,
+        "host": info.get("host"),
+        "holder": info.get("session"),
+        "age_seconds": max(0, round(now - since)) if isinstance(since, (int, float)) else None,
+        "ttl_seconds": round(ttl) if isinstance(ttl, (int, float)) else None,
+    }
+
+
+def _claim_sort_key(row: dict) -> tuple[str, int]:
+    repo, _sep, number = row["target"].rpartition("#")
+    return (repo, int(number))
 
 
 _CLAIM_SESSION = re.compile(r"^(?P<name>.+)#(?P<num>\d+)$")
@@ -301,7 +346,12 @@ def _cycles_json(cycles: list[list[dict]]) -> list[list[dict]]:
 
 
 def to_json(model: dict, limit: int, stage: str) -> dict:
-    out = {"warnings": model["warnings"], "cycles": _cycles_json(model["cycles"]), "repos": {}}
+    out = {
+        "warnings": model["warnings"],
+        "cycles": _cycles_json(model["cycles"]),
+        "repos": {},
+        "claims": model["claims"],
+    }
     for repo, nodes in model["repos"].items():
         ready = [n for n in nodes if n["status"] == "ready"]
         claimed = [n for n in nodes if n["status"] == "claimed"]
@@ -471,6 +521,42 @@ def _append_warnings(text: str, warnings: list[str]) -> str:
     return f"{text}\n\n{lines}" if text else lines
 
 
+def fleet_repos(
+    local_repos: list[str],
+    machine_records: list[dict],
+    local_host: str,
+    code_dir: str = roadmap.CODE_DIR,
+) -> tuple[list[str], list[str]]:
+    """Add the repos that other machines enable to `local_repos`.
+
+    The machine registry gives the repos. `serve.merge_repo_inventory`
+    merges them, as the dashboard does. Returns (repos, warnings).
+
+    This machine can only read a repo that it has a checkout of. A repo
+    without one is left out, and a warning names it.
+    """
+    from . import serve
+
+    inventory = serve.merge_repo_inventory(
+        [{"repo": name} for name in local_repos], machine_records, local_host
+    )
+    repos = list(local_repos)
+    warnings = []
+    for item in inventory:
+        if item["local"] or not item.get("enabled"):
+            continue
+        name = item["repo"]
+        path = os.path.join(code_dir, name)
+        if os.path.isdir(path):
+            repos.append(name)
+        else:
+            warnings.append(
+                f"{name}: enabled on {item['machine']}, but {path} does not exist "
+                "on this machine. Issues and claims are not shown."
+            )
+    return repos, warnings
+
+
 def run(
     repo: str | None,
     limit: int,
@@ -480,15 +566,33 @@ def run(
     refresh: bool,
     code_dir: str = roadmap.CODE_DIR,
     enabled_repos=None,
-    claims_lookup=claims.claims_for,
+    claims_lookup=functools.partial(claims.claims_for, strict=True),
     connection: dict | None = None,
+    machine_records=None,
+    local_host: str | None = None,
+    unreadable: list[str] | None = None,
 ) -> tuple[str, int]:
     """Build and render `lupin roadmap`. Returns (output text, exit code).
 
     `connection` is the fleet Redis location, threaded from `cli.py`'s
     `--redis-*` flags. `build_roadmap` falls back to `gh_cache`'s own
     resolution when it is None, which reads the same fleet config.
+
+    Without `repo`, the repos are the ones this machine enables. If
+    `machine_records` is given, the repos that other machines enable are
+    added (see `fleet_repos`). It is a function that returns the machine
+    registry's records. If the registry cannot be read, a warning says so
+    and only this machine's repos are shown.
+
+    `unreadable` is the list that `machines.machines` and
+    `claims.claims_for` fill with the records they skipped. If it has
+    entries, a warning gives the count.
+
+    Claims are read strictly when `claims_lookup` is not given. A corrupt
+    claim then raises. A caller that passes its own lookup, with a
+    `skipped` list, can skip a corrupt claim.
     """
+    fleet_warnings: list[str] = []
     if repo:
         repos = [repo]
         explicit_repo = True
@@ -499,28 +603,39 @@ def run(
             enabled_repos = serve.enabled_repos
         repos = enabled_repos()
         explicit_repo = False
+        if machine_records is not None:
+            try:
+                records = machine_records()
+            except CoordinatorUnreachable as exc:
+                fleet_warnings.append(
+                    f"{exc} is unavailable. Showing the repos that this machine enables."
+                )
+            else:
+                repos, fleet_warnings = fleet_repos(
+                    repos, records, local_host or machines.hostname(), code_dir
+                )
 
-    if not repos:
-        return "No ready tasks in any repo. Nothing to run.", 0
-
-    model = build_roadmap(
-        repos,
-        code_dir=code_dir,
-        refresh=refresh,
-        claims_lookup=claims_lookup,
-        connection=connection,
-    )
+    if repos:
+        model = build_roadmap(
+            repos,
+            code_dir=code_dir,
+            refresh=refresh,
+            claims_lookup=claims_lookup,
+            connection=connection,
+        )
+    else:
+        model = {"repos": {}, "cycles": [], "warnings": [], "claims": []}
+    model["warnings"] = fleet_warnings + model["warnings"]
+    if unreadable:
+        names = ", ".join(sorted(unreadable))
+        model["warnings"].append(f"skipped {len(unreadable)} unreadable Redis record(s): {names}")
     multi_repo = len(repos) > 1
 
     if dag:
         text, exit_code = render_dag(model, multi_repo)
         if as_json:
-            if exit_code != 0:
-                return json.dumps({"cycles": _cycles_json(model["cycles"])}), exit_code
-            return json.dumps(dag_to_json(model, multi_repo)), 0
-        if exit_code == 0:
-            text = _append_warnings(text, model["warnings"])
-        return text, exit_code
+            return json.dumps(dag_to_json(model, multi_repo)), exit_code
+        return _append_warnings(text, model["warnings"]), exit_code
 
     if as_json:
         return json.dumps(to_json(model, limit, stage)), 0

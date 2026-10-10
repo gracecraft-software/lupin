@@ -125,7 +125,7 @@ def test_release_quest_focuses_moves_on_down_when_another_machine_is_ready(redis
     monkeypatch.setattr(reconcile.roadmap, "cached_dependency_dag", lambda repos, **kw: dag)
     monkeypatch.setattr(
         reconcile.machines, "machines",
-        lambda connection: [_machine("mac-studio", state="offline"), _machine("mini-2", used=0, max_=4)],
+        lambda connection, **_: [_machine("mac-studio", state="offline"), _machine("mini-2", used=0, max_=4)],
     )
 
     lines = reconcile._release_quest_focuses([running], ["repo"], _kw(redis_port))
@@ -141,7 +141,7 @@ def test_release_quest_focuses_ends_on_down_with_no_replacement(redis_port, flus
     running = _quest("session-rewrite", [{"number": 418, "title": "t", "done": False}])
     dag = {"repos": {"repo": [{"number": 418, "blockedBy": [], "blocking": []}]}}
     monkeypatch.setattr(reconcile.roadmap, "cached_dependency_dag", lambda repos, **kw: dag)
-    monkeypatch.setattr(reconcile.machines, "machines", lambda connection: [_machine("mac-studio", state="offline")])
+    monkeypatch.setattr(reconcile.machines, "machines", lambda connection, **_: [_machine("mac-studio", state="offline")])
 
     lines = reconcile._release_quest_focuses([running], ["repo"], _kw(redis_port))
 
@@ -149,12 +149,28 @@ def test_release_quest_focuses_ends_on_down_with_no_replacement(redis_port, flus
     assert quest.read_focus("session-rewrite", **_kw(redis_port)) is None
 
 
+def test_release_quest_focuses_raises_on_corrupt_machine_record_and_keeps_focus(
+    redis_port, flush_redis, monkeypatch
+):
+    # A bad record stops the pass. It must not read as offline.
+    quest.write_focus("session-rewrite", "bad-box", pinned=False, **_kw(redis_port))
+    _client(redis_port).set(f"{machines.PREFIX}machine:bad-box", "{not json")
+    running = _quest("session-rewrite", [{"number": 418, "title": "t", "done": False}])
+    dag = {"repos": {"repo": [{"number": 418, "blockedBy": [], "blocking": []}]}}
+    monkeypatch.setattr(reconcile.roadmap, "cached_dependency_dag", lambda repos, **kw: dag)
+
+    with pytest.raises(json.JSONDecodeError):
+        reconcile._release_quest_focuses([running], ["repo"], _kw(redis_port))
+
+    assert quest.read_focus("session-rewrite", **_kw(redis_port))["machine"] == "bad-box"
+
+
 def test_release_quest_focuses_idle_sets_timer_then_releases_after_30m(redis_port, flush_redis, monkeypatch):
     quest.write_focus("session-rewrite", "mac-studio", pinned=False, **_kw(redis_port))
     blocked = _quest("session-rewrite", [{"number": 418, "title": "t", "done": False}])
     dag = {"repos": {"repo": [{"number": 418, "blockedBy": [{"repo": "repo", "number": 999}], "blocking": []}]}}
     monkeypatch.setattr(reconcile.roadmap, "cached_dependency_dag", lambda repos, **kw: dag)
-    monkeypatch.setattr(reconcile.machines, "machines", lambda connection: [_machine("mac-studio", used=0, max_=4)])
+    monkeypatch.setattr(reconcile.machines, "machines", lambda connection, **_: [_machine("mac-studio", used=0, max_=4)])
 
     # First run: condition just started -- sets idle_since, releases nothing.
     lines = reconcile._release_quest_focuses([blocked], ["repo"], _kw(redis_port))
@@ -184,7 +200,7 @@ def test_release_quest_focuses_idle_timer_resets_once_a_task_is_ready(redis_port
     ready = _quest("session-rewrite", [{"number": 418, "title": "t", "done": False}])
     dag = {"repos": {"repo": [{"number": 418, "blockedBy": [], "blocking": []}]}}
     monkeypatch.setattr(reconcile.roadmap, "cached_dependency_dag", lambda repos, **kw: dag)
-    monkeypatch.setattr(reconcile.machines, "machines", lambda connection: [_machine("mac-studio", used=0, max_=4)])
+    monkeypatch.setattr(reconcile.machines, "machines", lambda connection, **_: [_machine("mac-studio", used=0, max_=4)])
 
     lines = reconcile._release_quest_focuses([ready], ["repo"], _kw(redis_port))
 
@@ -222,8 +238,8 @@ def test_release_started_quests_moves_on_down_when_another_machine_can_continue(
         {"issues": [23], "targets": ["acme/repo#23"], "machine": "mac-studio", "state": "running"},
     )
     monkeypatch.setattr(reconcile.quest, "_locate_issue", lambda number, repos, code_dir: ("repo", "acme/repo", {"state": "OPEN"}))
-    monkeypatch.setattr(reconcile.machines, "machines", lambda connection: [_machine("mac-studio", state="draining")])
-    monkeypatch.setattr(reconcile.place_mod, "place", lambda task, connection: {"pick": "mini-2"})
+    monkeypatch.setattr(reconcile.machines, "machines", lambda connection, **_: [_machine("mac-studio", state="draining")])
+    monkeypatch.setattr(reconcile.place_mod, "place", lambda task, connection, **_: {"pick": "mini-2"})
 
     lines = reconcile._release_started_quests(["repo"], _kw(redis_port))
 
@@ -239,8 +255,8 @@ def test_release_started_quests_ends_on_down_with_no_replacement_and_releases_cl
     )
     claims.claim("acme/repo#23", "quest:q1", **_kw(redis_port))
     monkeypatch.setattr(reconcile.quest, "_locate_issue", lambda number, repos, code_dir: ("repo", "acme/repo", {"state": "OPEN"}))
-    monkeypatch.setattr(reconcile.machines, "machines", lambda connection: [_machine("mac-studio", state="offline")])
-    monkeypatch.setattr(reconcile.place_mod, "place", lambda task, connection: {"pick": None})
+    monkeypatch.setattr(reconcile.machines, "machines", lambda connection, **_: [_machine("mac-studio", state="offline")])
+    monkeypatch.setattr(reconcile.place_mod, "place", lambda task, connection, **_: {"pick": None})
 
     lines = reconcile._release_started_quests(["repo"], _kw(redis_port))
 
@@ -255,8 +271,8 @@ def test_release_started_quests_ends_on_down_with_nothing_left_to_release(redis_
         {"issues": [23], "targets": ["acme/repo#23"], "machine": "mac-studio", "state": "running"},
     )
     monkeypatch.setattr(reconcile.quest, "_locate_issue", lambda number, repos, code_dir: ("repo", "acme/repo", {"state": "OPEN"}))
-    monkeypatch.setattr(reconcile.machines, "machines", lambda connection: [])
-    monkeypatch.setattr(reconcile.place_mod, "place", lambda task, connection: {"pick": None})
+    monkeypatch.setattr(reconcile.machines, "machines", lambda connection, **_: [])
+    monkeypatch.setattr(reconcile.place_mod, "place", lambda task, connection, **_: {"pick": None})
 
     lines = reconcile._release_started_quests(["repo"], _kw(redis_port))
 
@@ -269,12 +285,29 @@ def test_release_started_quests_online_machine_is_left_alone(redis_port, flush_r
         {"issues": [23], "targets": ["acme/repo#23"], "machine": "mac-studio", "state": "running"},
     )
     monkeypatch.setattr(reconcile.quest, "_locate_issue", lambda number, repos, code_dir: ("repo", "acme/repo", {"state": "OPEN"}))
-    monkeypatch.setattr(reconcile.machines, "machines", lambda connection: [_machine("mac-studio", state="online")])
+    monkeypatch.setattr(reconcile.machines, "machines", lambda connection, **_: [_machine("mac-studio", state="online")])
 
     lines = reconcile._release_started_quests(["repo"], _kw(redis_port))
 
     assert lines == []
     assert quest.read_quest("q1", _kw(redis_port)) is not None
+
+
+def test_release_started_quests_raises_on_corrupt_machine_record_and_keeps_quest(
+    redis_port, flush_redis, monkeypatch
+):
+    _write_started_quest(
+        redis_port, "q1",
+        {"issues": [23], "targets": ["acme/repo#23"], "machine": "bad-box", "state": "running"},
+    )
+    _client(redis_port).set(f"{machines.PREFIX}machine:bad-box", "{not json")
+    monkeypatch.setattr(reconcile.quest, "_locate_issue", lambda number, repos, code_dir: ("repo", "acme/repo", {"state": "OPEN"}))
+    monkeypatch.setattr(reconcile.place_mod, "place", lambda task, connection, **_: {"pick": "mini-2"})
+
+    with pytest.raises(json.JSONDecodeError):
+        reconcile._release_started_quests(["repo"], _kw(redis_port))
+
+    assert quest.read_quest("q1", _kw(redis_port))["machine"] == "bad-box"
 
 
 # --------------------------------------------------------------------------
