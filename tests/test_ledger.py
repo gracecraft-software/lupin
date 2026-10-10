@@ -111,8 +111,10 @@ def test_read_skips_bad_entry_and_reports_it_once(connection, capsys):
     bad_id = ledger._client(**connection).xadd(
         ledger._stream_key("acme/repo"),
         {
-            "ts": "2026-10-10T00:00:00Z", "host": "machine-a",
-            "event": "work", "highlights": "not json",
+            "ts": "2026-10-10T00:00:00Z",
+            "host": "machine-a",
+            "event": "work",
+            "highlights": "not json",
         },
     )
     last = ledger.append_event("acme/repo", {"event": "work", "issue": 2}, **connection)

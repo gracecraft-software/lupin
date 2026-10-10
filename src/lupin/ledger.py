@@ -132,12 +132,12 @@ def read_events(
     redis_username: str | None = None,
     redis_password: str | None = None,
 ) -> list[dict]:
-    """Return the latest `limit` events, oldest first.
+    """Return up to `limit` events, oldest first.
 
     `limit` defaults to 10 and must be positive. Pass `None` to read the full
     stream. An empty stream returns an empty list. Raises
     `CoordinatorUnreachable` when Redis cannot be reached. A bad entry is
-    skipped and reported on stderr.
+    skipped. It still counts toward `limit`. Its stream ID is written to stderr.
     """
     key = _stream_key(repo)
     if limit is not None and (
