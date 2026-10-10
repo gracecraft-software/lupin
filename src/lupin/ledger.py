@@ -136,9 +136,10 @@ def read_events(
 
     `limit` defaults to 10 and must be positive. Pass `None` to read the full
     stream. An empty stream returns an empty list. Raises
-    `CoordinatorUnreachable` when Redis cannot be reached. read_events skips a
-    bad entry. The entry still counts toward `limit`. read_events writes its
-    stream ID to stderr.
+    `CoordinatorUnreachable` when Redis cannot be reached. read_events skips
+    only a bad entry: a Redis entry whose fields `_decode` cannot read. A bad
+    entry cannot be decoded. The entry still counts toward `limit`.
+    read_events writes its Redis entry ID to stderr.
     """
     key = _stream_key(repo)
     if limit is not None and (
@@ -159,7 +160,7 @@ def read_events(
     for stream_id, fields in entries:
         try:
             records.append(_decode(stream_id, fields))
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, RecursionError) as exc:
             print(
                 f"ledger: skipped bad entry {stream_id}: "
                 f"{type(exc).__name__}: {exc}",

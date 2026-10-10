@@ -117,6 +117,7 @@ def test_read_of_empty_ledger_returns_no_events(connection):
             "JSONDecodeError",
         ),
         ({"host": "machine-a", "event": "work"}, "KeyError"),
+        ({"ts": "2026-10-10T00:00:00Z", "event": "work"}, "KeyError"),
         (
             {
                 "ts": "2026-10-10T00:00:00Z",
@@ -126,8 +127,17 @@ def test_read_of_empty_ledger_returns_no_events(connection):
             },
             "ValueError",
         ),
+        (
+            {
+                "ts": "2026-10-10T00:00:00Z",
+                "host": "machine-a",
+                "event": "work",
+                "highlights": "[" * 100_000 + "]" * 100_000,
+            },
+            "RecursionError",
+        ),
     ],
-    ids=["bad-json", "missing-ts", "bad-issue"],
+    ids=["bad-json", "missing-ts", "missing-host", "bad-issue", "deep-json"],
 )
 def test_read_skips_bad_entry_and_reports_it_once(
     connection, capsys, bad_fields, error_name
