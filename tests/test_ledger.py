@@ -104,10 +104,52 @@ def test_read_of_empty_ledger_returns_no_events(connection):
     assert ledger.read_events("acme/empty", **connection) == []
 
 
-def test_read_skips_bad_entry_and_reports_it_once(connection, capsys):
+@pytest.mark.parametrize(
+    ("bad_fields", "error_name"),
+    [
+        (
+            {
+                "ts": "2026-10-10T00:00:00Z",
+                "host": "machine-a",
+                "event": "work",
+                "highlights": "not json",
+            },
+            "JSONDecodeError",
+        ),
+        ({"host": "machine-a", "event": "work"}, "KeyError"),
+        (
+            {
+                "ts": "2026-10-10T00:00:00Z",
+                "host": "machine-a",
+                "event": "work",
+                "issue": "abc",
+            },
+            "ValueError",
+        ),
+    ],
+    ids=["bad-json", "missing-ts", "bad-issue"],
+)
+def test_read_skips_bad_entry_and_reports_it_once(
+    connection, capsys, bad_fields, error_name
+):
     first = ledger.append_event(
         "acme/repo", {"event": "work", "issue": 1}, **connection
     )
+    bad_id = ledger._client(**connection).xadd(
+        ledger._stream_key("acme/repo"), bad_fields
+    )
+    last = ledger.append_event("acme/repo", {"event": "work", "issue": 2}, **connection)
+
+    events = ledger.read_events("acme/repo", **connection)
+
+    err = capsys.readouterr().err
+    assert events == [first, last]
+    assert err.count(bad_id) == 1
+    assert f"{error_name}:" in err
+
+
+def test_read_counts_bad_entry_toward_limit(connection, capsys):
+    ledger.append_event("acme/repo", {"event": "work", "issue": 1}, **connection)
     bad_id = ledger._client(**connection).xadd(
         ledger._stream_key("acme/repo"),
         {
@@ -119,9 +161,9 @@ def test_read_skips_bad_entry_and_reports_it_once(connection, capsys):
     )
     last = ledger.append_event("acme/repo", {"event": "work", "issue": 2}, **connection)
 
-    events = ledger.read_events("acme/repo", **connection)
+    events = ledger.read_events("acme/repo", limit=2, **connection)
 
-    assert events == [first, last]
+    assert events == [last]
     assert capsys.readouterr().err.count(bad_id) == 1
 
 
