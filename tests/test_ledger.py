@@ -177,6 +177,21 @@ def test_read_counts_bad_entry_toward_limit(connection, capsys):
     assert capsys.readouterr().err.count(bad_id) == 1
 
 
+def test_read_raises_on_non_utf8_field(connection):
+    ledger._client(**connection).xadd(
+        ledger._stream_key("acme/repo"),
+        {
+            "ts": "2026-10-10T00:00:00Z",
+            "host": "machine-a",
+            "event": "work",
+            "summary": b"\xff\xfe",
+        },
+    )
+
+    with pytest.raises(UnicodeDecodeError):
+        ledger.read_events("acme/repo", **connection)
+
+
 def test_append_and_read_report_unavailable_coordinator(closed_port):
     connection = {"redis_host": "127.0.0.1", "redis_port": closed_port}
 
