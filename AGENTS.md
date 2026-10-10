@@ -397,6 +397,8 @@ per-machine limit or add controls that the current code cannot support.
 
 ## Build and test
 
+Full gate (the repo's gate, used by the merge rules):
+
 ```
 nix flake check                                    # build + test, all systems
 nix shell nixpkgs#python3Packages.pytest -c pytest -v
@@ -409,9 +411,9 @@ Policy changes go to upstream `main` for the owner to merge. The loop policy is
 in `docs/delegation-loop.md`.
 
 1. Push the branch to the fork with `git push fork <branch>`. Never push to
-   `origin`. Do not add a remote. Do not use `/ship`. It pushes to `origin`
-   when direct push is allowed, and it can add a remote. Open the PR on the
-   fork:
+   `origin`. Do not add a remote. Do not run `/ship`'s push, remote, or PR
+   steps. It pushes to `origin` when direct push is allowed, and it can add a
+   remote. Open the PR on the fork:
 
    <!-- markdownlint-disable MD013 -->
    ```sh
@@ -457,11 +459,13 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
 - Port: `8789`. Check it is free with `ss -ltn` first. The `ss` command lists
   listening ports.
 - Machine: not set yet. The owner names it.
-- Owner tunnel command: `ssh -N -L 8789:127.0.0.1:8789 MACHINE`.
+- Owner tunnel command: `ssh -N -L 8789:127.0.0.1:8789 MACHINE`. A tunnel
+  forwards a port on the machine to your computer.
 - Local URL: `http://localhost:8789`.
 - Keep it running: a Herdr pane, or `systemd-run --user`. The `systemd-run`
   command starts a command as a background service.
-- Never bind to `0.0.0.0`. This is a security rule.
+- To bind means to choose the address a server listens on. Never bind to
+  `0.0.0.0`. This is a security rule.
 - Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
 - Do not use the start, stop, or run controls on this dashboard. New runs use
   the `lupin-loops` session. Older loops may use an old session until they

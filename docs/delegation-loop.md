@@ -28,17 +28,17 @@ fail without triage access. Check before you write it into a report.
    git fetch fork
    ```
 
-2. Create a worktree for your branch. Keep its path under `.claude/worktrees/`.
-   Run:
+2. Create a worktree for your branch. When you create the worktree by hand,
+   keep its path under `.claude/worktrees/`. Run:
 
    ```bash
    git worktree add <path> -b <branch> fork/release/next
    ```
 
 3. Push the branch to the fork with `git push fork <branch>`. Never push to
-   `origin`. Do not add a remote. Do not use `/ship`. It pushes to `origin`
-   when direct push is allowed, and it can add a remote. Open the PR on the
-   fork:
+   `origin`. Do not add a remote. Do not run `/ship`'s push, remote, or PR
+   steps. It pushes to `origin` when direct push is allowed, and it can add a
+   remote. Open the PR on the fork:
 
    <!-- markdownlint-disable MD013 -->
    ```sh
@@ -59,9 +59,10 @@ checkout has no `fork` remote, stop. Then report the missing remote.
 Do not add a remote.
 
 `lupin run` still starts each loop from `origin/HEAD`, which is upstream `main`.
-It does not start from `fork/release/next`. Until the owner changes `lupin run`,
-do not use it for feature work. Create feature worktrees with the Herdr
-worktree commands above, or the manual steps in rule 1.
+`origin/HEAD` is the default branch on `origin`. It does not start from
+`fork/release/next`. Until the owner changes `lupin run`, do not use it for
+feature work. Create feature worktrees with the Herdr worktree commands above,
+or the manual steps in rule 1.
 
 ## Pull request and review
 
