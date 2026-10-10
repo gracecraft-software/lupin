@@ -63,10 +63,9 @@ lupin resume [--machine M | --all] [--json]
 `ledger append` stores events in Redis. It records the time and host. Repeat
 digest options to add more than one item. Repeat `--child` for each split
 issue. `ledger read --json` returns up to the latest 10 events, oldest first.
-Use `--limit N` to choose another positive count. Bad rows are skipped
-and reported on stderr. Both commands exit 3 if
-Redis is unavailable. The roadmap shows no ledger annotations and a warning.
-It ignores `.loop/loop-state.json`.
+Use `--limit N` to choose another positive count. Bad rows are skipped and
+reported on stderr. Both commands exit 3 if Redis is unavailable. The roadmap
+shows no ledger annotations and a warning. It ignores `.loop/loop-state.json`.
 
 `review-route --prefetch` fetches issue/PR text up front -- body, comments,
 and (for a PR) reviews and a diff stat (changed files, additions/deletions,

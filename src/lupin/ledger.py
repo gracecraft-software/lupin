@@ -136,10 +136,12 @@ def read_events(
 
     `limit` defaults to 10 and must be positive. Pass `None` to read the full
     stream. An empty stream returns an empty list. Raises
-    `CoordinatorUnreachable` when Redis cannot be reached. read_events skips
-    only a bad entry: a Redis entry whose fields `_decode` cannot read. A bad
-    entry cannot be decoded. The entry still counts toward `limit`.
-    read_events writes its Redis entry ID to stderr.
+    `CoordinatorUnreachable` when Redis cannot be reached.
+    An entry is skipped when `_decode` raises KeyError, ValueError, or
+    RecursionError. The entry ID and the exception type go to stderr for each
+    skipped entry. A skipped entry still counts toward `limit`.
+    A field that is not valid UTF-8 makes redis-py raise UnicodeDecodeError
+    before `_decode` runs. read_events does not catch it, so the read fails.
     """
     key = _stream_key(repo)
     if limit is not None and (
