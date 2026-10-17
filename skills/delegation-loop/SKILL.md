@@ -544,14 +544,20 @@ until no approved PR is left.
    branch. Use it to choose `origin` or `fork` for `REMOTE` in the ancestor
    check in "Review and merge each pull request".
 
-2. For each PR, get the commit of its latest approval:
+2. For each PR, get the commit of its latest formal decision, if that decision
+   is an approval:
 
    ```sh
-   gh api repos/OWNER/REPO/pulls/<PR-number>/reviews \
-     --jq '[.[] | select(.state == "APPROVED")] | last | .commit_id'
+   gh api --paginate --slurp repos/OWNER/REPO/pulls/<PR-number>/reviews \
+     --jq '[.[][] | select(.state == "APPROVED"
+       or .state == "CHANGES_REQUESTED")] | last
+       | if .state == "APPROVED" then .commit_id else null end'
    ```
 
-   The output is `null` when no reviewer approved the PR.
+   The output is `null` when the latest formal decision is not an approval,
+   or when no reviewer made one. `--paginate --slurp` reads every page. The
+   reviews endpoint returns 30 reviews per page. A later `CHANGES_REQUESTED`
+   removes an earlier approval. A `COMMENTED` review does not count.
 
 3. Merge the PR only when that commit equals its `headRefOid`. A push after the
    approval changes the head, so the PR waits for a new approval. Then run the
