@@ -169,6 +169,54 @@ Start a new agent session and confirm it loads `/delegation-loop`, `/triage`,
 confirm it loads `/ui-pressure-test`. Do not start a worker if a skill it
 needs is missing.
 
+## Open pull requests come first
+
+Review every open PR before you start issue work. Check them again after
+every merge and after every worker report.
+
+1. List them, drafts included:
+
+   ```sh
+   gh pr list --repo OWNER/REPO --state open --limit 200 \
+     --json number,headRefOid,isDraft,mergeable
+   ```
+
+2. Each PR must be in one of two states:
+   - **Approved.** A submitted review has the state APPROVED, and its
+     `commit_id` is the full SHA of the current head. A review of an older
+     SHA does not count. A PR comment that says "approve" does not count.
+     Read the reviews with
+     `gh api --paginate repos/OWNER/REPO/pulls/N/reviews`.
+   - **Worked.** A reviewer or a fixer runs on the current head. Check that
+     the worker still runs: use `kill -0` on its saved PID, `ListAgents`, or
+     `herdr agent list`. A new commit shows that work happened. It does not
+     show that the worker still runs. A ledger "dispatch" entry is not proof.
+3. A PR in neither state is idle. Dispatch a reviewer now if no review covers
+   the current head. Dispatch a fixer now if the PR has a conflict with its
+   base branch (`mergeable` is `CONFLICTING`) or an open finding. An approved
+   PR with a conflict needs a fixer too. A comment that says "approve" is not
+   a review. Dispatch a reviewer for that head. Post its verdict as a review
+   (step 6).
+4. PR work comes before issue work. If the slots are full, stop the
+   lowest-priority issue job first. One reviewer may cover several small
+   PRs. If every slot holds PR work and the machine has room (`free -h`),
+   run one more job. A failing gate on the base branch blocks only the
+   merge. It does not block a review or a fix.
+5. A new head voids the old approval. A merge of the base branch into the PR
+   branch makes a new head. Dispatch a new review at once. It may cover only
+   the files that the new commits changed.
+6. Post a review through the API, with the SHA that you read. `gh pr review`
+   uses the head at the time of posting, and the head can move first:
+
+   ```sh
+   pr_number=N
+   head_sha=FULL_SHA_THAT_YOU_READ
+   gh api "repos/OWNER/REPO/pulls/${pr_number}/reviews" \
+     -f event=APPROVE -f commit_id="$head_sha" -F body=@verdict.md
+   ```
+
+   Use `-f event=REQUEST_CHANGES` when the review asks for changes.
+
 ## Read the backlog
 
 Read the backlog only after you handle the open PRs. See "Pull requests come
@@ -450,7 +498,8 @@ Review the latest PR commit.
 Repeat until the reviewer approves the current head SHA. The head SHA is the
 newest commit ID on the branch.
 The orchestrator (the agent that dispatches and merges work) posts the verdict
-and findings on the PR.
+and findings on the PR. It posts them as a review through the API, with the
+reviewed SHA (see "Open pull requests come first").
 
 Before a branch is merged, it must contain the current `main`. Fetch
 `origin` and the remote that holds the PR branch. Then run this check.
@@ -623,5 +672,6 @@ The loop is not finished while an unblocked PR waits for a review, a fix, or a
 merge.
 
 Continue working until the backlog is empty or every remaining item is blocked
-on an owner decision. Then run `/handoff`. State the exact next action and any
+on an owner decision, and every open PR is approved at its current head or has
+a live worker. Then run `/handoff`. State the exact next action and any
 missing owner input.
