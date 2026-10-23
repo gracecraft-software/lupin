@@ -1106,13 +1106,19 @@ background:var(--code)}
 .issue-details summary{cursor:pointer}
 .issue-body{white-space:pre-wrap;overflow-wrap:anywhere;margin:.35rem 0}
 .activity-comments{padding-left:1.5rem}
-.loops-shell{display:flex;gap:1rem;align-items:flex-start}
-.loops-side{width:260px;flex:none;padding:.6rem}
+.loops-shell{display:flex;gap:1rem;align-items:flex-start;min-width:0}
+.loops-side{width:260px;flex:none;min-width:0;padding:.6rem}
 .loops-main{flex:1;min-width:0}
+.loops-main>.card{min-width:0;overflow:hidden}
+.loops-main pre{max-width:100%}
+.loops-main form{min-width:0;max-width:100%}
+.loops-main form[action="/loops/send"]{display:flex!important;flex:1 1 100%;align-items:center}
+.loops-main form[action="/loops/send"] input[name="text"]{min-width:0;flex:1 1 12rem;width:auto}
 .loops-row{display:block;padding:.3rem .2rem;color:inherit}
 .loops-row.sel{font-weight:700}
 .loops-group{color:var(--ink3);margin-top:.6rem;font-size:.8rem}
 .err{color:#9b2226}
+@media(max-width:700px){.loops-shell{flex-direction:column}.loops-side{width:100%}.loops-main{width:100%}}
 """
 
 JS = """
@@ -1251,7 +1257,7 @@ def icon(d: str, size: int = 16) -> str:
 
 def render_nav(active: str) -> str:
     links = "".join(
-        f"<a class='navlink{' active' if key == active else ''}' href='{href}'>"
+        f"<a class='navlink{' active' if key == active else ''}' href='{href}' aria-label='{esc(label)}'>"
         f"{icon(path)}<span>{esc(label)}</span></a>"
         for key, href, label, path in NAV_ITEMS
     )
