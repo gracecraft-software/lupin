@@ -4321,13 +4321,26 @@ def test_debrief_index_shows_the_period_of_a_periodic_debrief(tmp_path, monkeypa
     assert "2026-10-02 09:00:00 UTC -6h" in body
 
 
-def test_debrief_index_says_when_there_are_none(tmp_path, monkeypatch):
+def test_debrief_index_empty_state_explains_sources_and_writer(tmp_path, monkeypatch):
     monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
 
     handler = _get_handler("/debrief", {})
     handler.do_GET()
 
-    assert b"No debriefs yet." in handler.reply.call_args.args[0]
+    body = handler.reply.call_args.args[0].decode()
+    assert (
+        "<p>No debriefs yet.</p><p>Debriefs are written to the local "
+        "<code>debriefs/</code> folder. The fleet shares their digests here. "
+        "Run <code>lupin agent</code> to write periodic debriefs.</p>"
+    ) in body
+
+
+def test_debrief_ui_mockup_documents_empty_state():
+    source = (Path(__file__).parents[1] / "docs" / "ui.dc.html").read_text(encoding="utf-8")
+    assert "1l · Debriefs" in source
+    assert "local <code" in source and "debriefs/" in source
+    assert "fleet shares their digests" in source
+    assert "lupin agent" in source
 
 
 def test_debrief_page_renders_markdown_escapes_text_and_maps_images(tmp_path, monkeypatch):
