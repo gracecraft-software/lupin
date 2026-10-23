@@ -57,9 +57,14 @@ lupin pause [--machine M | --all] [--json]
 lupin resume [--machine M | --all] [--json]
 ```
 
-`route` and `classify` print `model effort`, or `category size`. Add `--json`
-for a JSON object. An unknown category or size makes `route` and `review-route`
-print the valid values to stderr. The exit code is 2.
+`route` and `classify` print a plain result by default (`model effort`, or
+`category size`). A blocked route tries the other models in its tier, then
+lower tiers. It does not use a higher tier to avoid a quota wait. If quota
+blocks every allowed model, `route` prints a deferral reason and wait time
+instead of a model. Add `--json` for a JSON object; a deferred route includes
+`reason` and `wait_seconds`. If the category or size is not known, `route`
+and `review-route` print one line to stderr. The line lists valid values.
+The exit code is 2.
 
 `ledger append` stores an event in Redis, with the time and host. Repeat
 `--child` for each split issue. Repeat a digest option to add more items.
@@ -145,12 +150,15 @@ lupin enable my-repo --platform omp \
   --orchestrator claude
 ```
 
-At loop start, Lupin reads quota from the shared cache. The data must be under
-five minutes old, and it must show usable quota for a candidate. Lupin skips
-blocked providers. It picks the candidate with the most headroom across its
-known windows. For a provider with more than one login, headroom is that of the
-best login that is not blocked. Profile order breaks ties. If no candidate has
-fresh, usable quota, Lupin refuses to start the loop.
+Profiles are local to each worker. Set them on each worker that can start the
+repo. At loop start, Lupin uses quota data from the shared cache. The data
+must be less than five minutes old and include usable quota for a candidate.
+Claude's weekly quota is blocked above 90%. This limit has no reset grace.
+Lupin skips blocked providers, then picks the candidate with the most quota
+headroom across its known windows. For a provider with more than one login,
+headroom is that of the best login that is not blocked. Profile order breaks
+ties. If no candidate
+has fresh, usable quota, Lupin refuses to start the loop.
 
 Explicit `--platform`, `--provider`, or `--model` selects one fixed orchestrator
 for the run, and skips profile routing. For OMP, use `--platform omp`, and

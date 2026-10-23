@@ -639,7 +639,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    _route_args(sub.add_parser("route", help="pick a {model, effort} for a (category, size) pair"))
+    _route_args(sub.add_parser("route", help="pick a model or defer when quota blocks all options"))
     _classify_args(sub.add_parser("classify", help="sort an issue into (category, size)"))
     _fetch_models_args(
         sub.add_parser("fetch-models", help="fetch today's live model list and prices per subscription")
@@ -765,6 +765,13 @@ def _cmd_route(args: argparse.Namespace) -> int:
         return 2
     if args.json:
         print(json.dumps(result))
+    elif "reason" in result:
+        wait_seconds = result.get("wait_seconds")
+        wait = (
+            f"; wait {place_mod.format_duration(wait_seconds)}"
+            if wait_seconds is not None else ""
+        )
+        print(f"deferred: {result['reason']}{wait}")
     else:
         print(f"{result['model']} {result['effort']}")
     return 0
@@ -1246,6 +1253,8 @@ def _format_place_explain(result: dict) -> str:
     elif result.get("wait_seconds") is not None:
         wait = place_mod.format_duration(result["wait_seconds"])
         lines.append(f"every candidate is out of quota -- wait {wait}, same model")
+    elif result.get("reason"):
+        lines.append(f"deferred: {result['reason']}")
     lines.append("")
     if result["candidates"]:
         lines.append(_format_place_table(result))
@@ -1288,6 +1297,8 @@ def _cmd_place(args: argparse.Namespace) -> int:
                 f"wait {wait}, same model ({result['model']})",
                 file=sys.stderr,
             )
+        elif result.get("reason"):
+            print(f"deferred: {result['reason']}", file=sys.stderr)
         else:
             print(f"no online machine runs provider {result['provider']!r}", file=sys.stderr)
         return 2

@@ -970,6 +970,22 @@ def test_route_unknown_category_or_size_is_a_usage_error_not_a_traceback(capsys)
     assert "size-m" in err
 
 
+def test_route_prints_a_reason_when_quota_defers(monkeypatch, capsys):
+    result = {
+        "model": "sonnet",
+        "effort": "high",
+        "wait_seconds": 3600,
+        "reason": "all allowed models are blocked by quota",
+    }
+    monkeypatch.setattr(cli.route_mod, "route", lambda *args, **kwargs: result)
+
+    assert cli.main(["route", "coding", "size-m"]) == 0
+
+    output = capsys.readouterr().out
+    assert "deferred: all allowed models are blocked by quota" in output
+    assert "; wait " in output
+
+
 def test_route_reports_a_bad_model_tier_file(monkeypatch, tmp_path, capsys):
     path = tmp_path / "tiers.json"
     path.write_text(

@@ -23,8 +23,8 @@ def _row(provider, used_pct, resets_in_ms, duration=QuotaDuration.FIVE_HOURS, no
 
 
 class BlockedTests(unittest.TestCase):
-    """Reserve rule (decision 1): >=95% blocks unless <3h to reset; >=100%
-    always blocks, with no 3h exception."""
+    """Claude's weekly window blocks above 90% with no grace. Other windows
+    use a 95% reserve unless under 3h remain; 100% is always blocked."""
 
     def test_under_95_percent_is_never_blocked(self):
         rows = [_row("claude", 94, 10 * HOUR_MS)]
@@ -67,6 +67,18 @@ class BlockedTests(unittest.TestCase):
     def test_other_providers_rows_do_not_affect_this_provider(self):
         rows = [_row("openai", 100, MIN_MS)]
         self.assertFalse(pace.blocked(rows, "claude", 0))
+
+    def test_claude_weekly_usage_above_90_percent_is_blocked(self):
+        rows = [_row("claude", 91, 10 * HOUR_MS, QuotaDuration.WEEKLY)]
+        self.assertTrue(pace.blocked(rows, "claude", 0))
+
+    def test_claude_weekly_usage_at_90_percent_is_not_blocked(self):
+        rows = [_row("claude", 90, 10 * HOUR_MS, QuotaDuration.WEEKLY)]
+        self.assertFalse(pace.blocked(rows, "claude", 0))
+
+    def test_claude_weekly_usage_above_90_percent_has_no_reset_grace(self):
+        rows = [_row("claude", 91, 2 * HOUR_MS, QuotaDuration.WEEKLY)]
+        self.assertTrue(pace.blocked(rows, "claude", 0))
 
 
 class LeanInTests(unittest.TestCase):

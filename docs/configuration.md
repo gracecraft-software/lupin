@@ -479,6 +479,10 @@ key wins over the directory.
 - **Effect**: `route`, `review-route`, the Models page, and the benchmark
   fallback read this file. An empty value is an error:
   `LUPIN_MODEL_TIERS must name a file`. The file format is in `README.md`.
+  On quota fallback, `route` needs a live price snapshot no more than seven
+  days old. It uses only a model whose known input, output, and cache prices
+  are no higher than the blocked model. If prices are missing or unclear,
+  `route` waits for quota. Run `lupin fetch-models` to refresh the snapshot.
 - **Read by**: `src/lupin/model_tiers.py` (`path`, `load`),
   `src/lupin/serve.py` (`_model_tiers_path`).
 - **Set by**: the user.

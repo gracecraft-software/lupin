@@ -2436,6 +2436,29 @@ def test_select_orchestrator_uses_the_account_with_quota_left():
     }
 
 
+def test_select_orchestrator_blocks_claude_when_weekly_usage_exceeds_90_percent():
+    now = time.time()
+    snapshot = {
+        "claude": _quota_entry([
+            _quota_row("claude", 91, 6 * 24 * _HOUR_MS, QuotaDuration.WEEKLY, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 91, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+
+    choice = loop_runtime.select_orchestrator(
+        ["claude", "openai-codex/gpt-6-luna"], snapshot, now=now
+    )
+
+    assert choice == {
+        "platform": "omp",
+        "provider": "openai-codex",
+        "model": "openai-codex/gpt-6-luna",
+        "quota_headroom": 9,
+    }
+
+
 def test_select_orchestrator_skips_a_provider_when_every_account_is_blocked():
     now = time.time()
     snapshot = {

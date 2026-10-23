@@ -344,6 +344,61 @@ def test_place_reports_a_wait_without_filtering_machines(redis_port, flush_redis
     assert result["candidates"] == []
     assert result["skipped"] == {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 0}
 
+def test_place_does_not_select_machine_for_unknown_quota_reset(
+    redis_port, flush_redis, monkeypatch
+):
+    """A quota block without a reset is still a deferral, not a machine pick."""
+    _write_machine(redis_port, "mac-studio", quota=_CLAUDE_QUOTA)
+    monkeypatch.setattr(
+        place.route_mod,
+        "route",
+        lambda *a, **kw: {
+            "model": "opus",
+            "effort": "high",
+            "wait_seconds": None,
+            "reason": "all allowed models are blocked by quota",
+        },
+    )
+
+    result = place.place("retry backoff", _kw(redis_port))
+
+    assert result["pick"] is None
+    assert result["candidates"] == []
+    assert result["wait_seconds"] is None
+    assert result["reason"] == "all allowed models are blocked by quota"
+
+
+def test_cli_place_reports_unknown_quota_reset_reason(
+    redis_port, flush_redis, tmp_path, capsys, clean_fleet_env, monkeypatch
+):
+    _write_machine(redis_port, "mac-studio", quota=_CLAUDE_QUOTA)
+    monkeypatch.setattr(
+        place.route_mod,
+        "route",
+        lambda *a, **kw: {
+            "model": "opus",
+            "effort": "high",
+            "wait_seconds": None,
+            "reason": "all allowed models are blocked by quota",
+        },
+    )
+    common = [
+        "--redis-host", "127.0.0.1", "--redis-port", str(redis_port),
+        "--config-path", str(tmp_path / "fleet.json"),
+    ]
+
+    assert cli.main(["place", "retry backoff", *common]) == 2
+    plain = capsys.readouterr()
+    assert "all allowed models are blocked by quota" in plain.err
+    assert "no online machine" not in plain.err
+
+    assert cli.main(["place", "retry backoff", "--explain", *common]) == 2
+    explain = capsys.readouterr()
+    assert "all allowed models are blocked by quota" in explain.out
+
+    assert cli.main(["place", "retry backoff", "--json", *common]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == "all allowed models are blocked by quota"
 
 def test_place_reports_routes_downgrade_and_ranks_the_new_provider(redis_port, flush_redis, monkeypatch):
     """route() already moved off a blocked pick onto another provider --
