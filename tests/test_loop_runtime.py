@@ -530,6 +530,8 @@ def test_start_loop_starts_without_delegation_doc_and_skips_duplicate(
 
     def systemd_run(repo, kind, command, **kwargs):
         launches.append((repo, kind, command, kwargs))
+        metadata = loop_runtime._read_metadata("widgets")
+        loop_runtime._set_loop_state("widgets", metadata, "running")
         return 0, ""
 
     monkeypatch.setattr(loop_runtime, "_systemd_run", systemd_run)
@@ -546,7 +548,7 @@ def test_start_loop_starts_without_delegation_doc_and_skips_duplicate(
     assert repo == "widgets"
     assert kind == "loop"
     metadata = loop_runtime._read_metadata("widgets")
-    assert metadata["state"] == "starting"
+    assert metadata["state"] == "running"
     assert metadata["platform"] == "omp"
     assert metadata["provider"] == "openai-codex"
     assert metadata["model"] == "openai-codex/gpt-5.2"
@@ -1118,7 +1120,13 @@ def test_start_loop_works_while_the_shared_session_runs_other_loops(monkeypatch,
     monkeypatch.setattr(
         loop_runtime, "_run", lambda argv, **kwargs: (3, "inactive") if argv[0] == "systemctl" else (1, "no session")
     )
-    monkeypatch.setattr(loop_runtime, "_systemd_run", lambda *args, **kwargs: (0, ""))
+
+    def systemd_run(*args, **kwargs):
+        metadata = loop_runtime._read_metadata("widgets")
+        loop_runtime._set_loop_state("widgets", metadata, "running")
+        return 0, ""
+
+    monkeypatch.setattr(loop_runtime, "_systemd_run", systemd_run)
 
     started, message = loop_runtime.start_loop("widgets", platform="omp")
 
@@ -1222,7 +1230,13 @@ def test_start_loop_selects_profile_candidate_and_persists_it_for_recovery(
         "_run",
         lambda argv, **kwargs: (3, "inactive") if argv[0] == "systemctl" else (1, "no session"),
     )
-    monkeypatch.setattr(loop_runtime, "_systemd_run", lambda *args, **kwargs: (0, ""))
+
+    def systemd_run(*args, **kwargs):
+        metadata = loop_runtime._read_metadata("widgets")
+        loop_runtime._set_loop_state("widgets", metadata, "running")
+        return 0, ""
+
+    monkeypatch.setattr(loop_runtime, "_systemd_run", systemd_run)
 
     started, _ = loop_runtime.start_loop("widgets")
 
@@ -1275,9 +1289,14 @@ def _start_harness(monkeypatch, tmp_path: Path, make_checkout):
         lambda argv, **kwargs: (3, "inactive") if argv[0] == "systemctl" else (1, "no session"),
     )
     launches = []
-    monkeypatch.setattr(
-        loop_runtime, "_systemd_run", lambda *args, **kwargs: launches.append(args) or (0, "")
-    )
+
+    def systemd_run(*args, **kwargs):
+        launches.append(args)
+        metadata = loop_runtime._read_metadata("widgets")
+        loop_runtime._set_loop_state("widgets", metadata, "running")
+        return 0, ""
+
+    monkeypatch.setattr(loop_runtime, "_systemd_run", systemd_run)
     return checkout, launches
 
 
@@ -1507,6 +1526,8 @@ def test_agent_workspace_directory_is_the_run_worktree_not_the_checkout(
 ):
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
     loop_runtime.start_loop("widgets", platform="claude")
+    metadata = loop_runtime._read_metadata("widgets")
+    loop_runtime._set_loop_state("widgets", metadata, "starting")
     worktree = loop_runtime._read_metadata("widgets")["worktree"]
     herdr_calls = []
 
@@ -1602,6 +1623,83 @@ def test_start_loop_removes_its_new_worktree_when_the_service_does_not_start(
     assert metadata["state"] == "failed"
     assert "worktree" not in metadata
 
+
+@pytest.mark.parametrize(
+    (
+        "worker_state", "service_state", "stop_result", "workspace_id",
+        "expect_stop", "expect_cleanup",
+    ),
+    [
+        ("failed", "active", (0, ""), None, True, True),
+        ("failed", "active", (1, "stop failed"), None, True, False),
+        ("failed", "active", (0, ""), "workspace-1", True, False),
+        ("starting", "inactive", (0, ""), None, False, True),
+    ],
+)
+def test_run_reports_immediate_failure_and_cleans_only_when_safe(
+    monkeypatch, tmp_path: Path, make_checkout, worker_state, service_state,
+    stop_result, workspace_id, expect_stop, expect_cleanup, capsys,
+):
+    from lupin import cli
+
+    checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
+    stopped = []
+
+    def run(argv, **kwargs):
+        if "stop" in argv:
+            stopped.append(argv)
+            return stop_result
+        if "systemctl" in argv:
+            if "--quiet" in argv:
+                return 3, "inactive"
+            return (0, "active") if service_state == "active" else (3, "inactive")
+        return 1, "no session"
+
+    monkeypatch.setattr(loop_runtime, "_run", run)
+    failed = {}
+
+    def worker_fails(*args, **kwargs):
+        metadata = loop_runtime._read_metadata("widgets")
+        failed["worktree"] = metadata["worktree"]
+        failed["branch"] = metadata["branch"]
+        if workspace_id is not None:
+            metadata["workspace_id"] = workspace_id
+        if worker_state == "failed":
+            loop_runtime._set_loop_state(
+                "widgets", metadata, "failed", reason="worker_exit", exit_code=2
+            )
+        return 0, ""
+
+    monkeypatch.setattr(loop_runtime, "_systemd_run", worker_fails)
+
+    assert cli.main(["run", "widgets", "--platform", "claude"]) == 1
+    output = capsys.readouterr().out
+    assert "worker" in output
+    assert bool(stopped) is expect_stop
+    metadata = loop_runtime._read_metadata("widgets")
+    assert metadata["state"] == "failed"
+    if expect_cleanup:
+        assert not Path(failed["worktree"]).exists()
+        assert _git_out(checkout, "branch", "--list", failed["branch"]) == ""
+        assert "worktree" not in metadata
+        assert "branch" not in metadata
+    else:
+        assert Path(failed["worktree"]).exists()
+        assert failed["branch"] in _git_out(
+            checkout, "branch", "--list", failed["branch"]
+        )
+        assert metadata["worktree"] == failed["worktree"]
+        assert metadata["branch"] == failed["branch"]
+        assert "lupin stop widgets" in output
+        assert "--force" not in output
+    events = loop_runtime.run_log.read_events(
+        loop_runtime.STATE_DIR, "widgets", metadata["run_id"]
+    )
+    assert any(
+        event["event"] == "error"
+        and event.get("error_type") == "WorkerStartError"
+        for event in events
+    )
 
 def test_start_loop_reports_a_worktree_git_keeps_when_the_service_does_not_start(
     monkeypatch, tmp_path: Path, make_checkout
@@ -1932,7 +2030,10 @@ def test_start_failure_cleans_up_and_records_the_run_as_failed(
         assert loop_runtime.start_loop("widgets", platform="claude")[0] is True
         return
     (run_dir,) = worktrees.iterdir()
-    assert message == f"forced {step}; worktree kept at {run_dir}: it has changes"
+    assert f"worktree kept at {run_dir}" in message
+    assert "it has changes" in message
+    assert "worktree remove" in message
+    assert "branch -d" in message
     assert (run_dir / "unsaved.txt").read_text(encoding="utf-8") == "work\n"
     assert metadata["worktree"] == str(run_dir)
     with pytest.raises(loop_runtime.LoopError, match=re.escape(str(run_dir))):
@@ -1982,6 +2083,8 @@ def test_start_failure_records_failed_when_the_handoff_copy_raises(
 def test_full_claude_slot_removes_the_new_worktree(monkeypatch, tmp_path: Path, make_checkout):
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
     loop_runtime.start_loop("widgets", platform="claude")
+    metadata = loop_runtime._read_metadata("widgets")
+    loop_runtime._set_loop_state("widgets", metadata, "starting")
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
     monkeypatch.setattr(loop_runtime, "_ensure_server", lambda *args: None)
     monkeypatch.setattr(loop_runtime, "_server_running", lambda session: True)
@@ -2182,9 +2285,14 @@ def test_start_loop_runs_a_second_loop_on_the_same_repo(monkeypatch, tmp_path: P
         loop_runtime, "_run", lambda argv, **kwargs: (3, "inactive") if argv[0] == "systemctl" else (1, "no session")
     )
     launches = []
-    monkeypatch.setattr(
-        loop_runtime, "_systemd_run", lambda repo, kind, command, **kwargs: launches.append((repo, command)) or (0, "")
-    )
+
+    def systemd_run(repo, kind, command, **kwargs):
+        launches.append((repo, command))
+        metadata = loop_runtime._read_metadata(repo)
+        loop_runtime._set_loop_state(repo, metadata, "running")
+        return 0, ""
+
+    monkeypatch.setattr(loop_runtime, "_systemd_run", systemd_run)
 
     first_ok, _ = loop_runtime.start_loop("widgets")
     second_ok, _ = loop_runtime.start_loop("widgets~2")
@@ -2352,7 +2460,12 @@ def test_a_numbered_loop_uses_the_orchestrator_profile_of_its_repo(monkeypatch, 
     monkeypatch.setattr(
         loop_runtime, "_run", lambda argv, **kwargs: (3, "inactive") if argv[0] == "systemctl" else (1, "no session")
     )
-    monkeypatch.setattr(loop_runtime, "_systemd_run", lambda *args, **kwargs: (0, ""))
+    def systemd_run(*args, **kwargs):
+        metadata = loop_runtime._read_metadata("widgets~2")
+        loop_runtime._set_loop_state("widgets~2", metadata, "running")
+        return 0, ""
+
+    monkeypatch.setattr(loop_runtime, "_systemd_run", systemd_run)
 
     started, _ = loop_runtime.start_loop("widgets~2")
 

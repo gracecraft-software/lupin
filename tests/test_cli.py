@@ -69,11 +69,14 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(
         ),
     )
     launched = []
-    monkeypatch.setattr(
-        loop_runtime,
-        "_systemd_run",
-        lambda repo, kind, command, **kwargs: launched.append((repo, kind, command, kwargs)) or (0, ""),
-    )
+
+    def systemd_run(repo, kind, command, **kwargs):
+        launched.append((repo, kind, command, kwargs))
+        metadata = loop_runtime._read_metadata(repo)
+        loop_runtime._set_loop_state(repo, metadata, "running")
+        return 0, ""
+
+    monkeypatch.setattr(loop_runtime, "_systemd_run", systemd_run)
 
     assert cli.main(["run", "widgets", "--json"]) == 0
 
@@ -88,7 +91,7 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     assert "--session" in command
     assert options["claude_limits"] is True
     metadata = json.loads((state_dir / "herdr-loops" / "widgets.json").read_text(encoding="utf-8"))
-    assert metadata["state"] == "starting"
+    assert metadata["state"] == "running"
     assert metadata["platform"] == "claude"
     assert Path(metadata["prompt_file"]).is_file()
     assert loop_runtime.run_log.valid_run_id(metadata["run_id"])
