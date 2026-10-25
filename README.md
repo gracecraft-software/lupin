@@ -215,7 +215,8 @@ their own licenses.
 
 | File | Content |
 | --- | --- |
-| `AGENTS.md` | Full command behavior and rules for agents that work on this repo. |
+| `AGENTS.md` | Agent and repository rules for work in this repo. |
+| `docs/user-guide.md` | User-facing command and state behavior. |
 | `docs/redis-schema.md` | Redis keys and their format. |
 | `docs/delegation-loop.md` | The loop policy for this repo. |
 | `skills/` | Shared skills for loops. `delegation-loop` is the main one. |

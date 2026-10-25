@@ -335,8 +335,8 @@ exit code 2 on the commands that use it. `--help` still works.
 - **Default**: `1`.
 - **Effect**: the loop monitor holds the `local` slot `claude` with this
   limit. A slot keeps the limit from its first `acquire`. A changed value
-  has no effect on a slot that already exists (see "How a slot's limit
-  (`max`) works" in `AGENTS.md`).
+  has no effect on a slot that already exists (see [How a slot's limit
+  (`max`) works](user-guide.md#how-a-slots-limit-max-works)).
 - **Read by**: `src/lupin/loop_runtime.py` (`_monitor_loop`).
 - **Set by**: the host config. `lupin run` copies it into loop units.
 

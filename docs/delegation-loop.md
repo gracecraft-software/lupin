@@ -6,7 +6,7 @@ This file is optional. Read the root `AGENTS.md` first.
 
 This repo is `OWNER/REPO`. The owner mounts a local checkout at
 `/code/<checkout>`. A loop agent does not edit this main checkout. Each run gets
-its own Git worktree in the loop state directory. See "State" in `AGENTS.md`.
+its own Git worktree in the loop state directory. See [State](user-guide.md#state).
 
 ## Lupin commands for a pass
 
