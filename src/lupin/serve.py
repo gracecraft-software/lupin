@@ -588,7 +588,14 @@ def merge_repo_inventory(
     local_repos: list[dict], machine_records: list[dict], local_host: str
 ) -> list[dict]:
     """Add repo inventories from other machines to this machine's repo list."""
-    repos = {repo["repo"]: {**repo, "local": True} for repo in local_repos}
+    repos = {
+        repo["repo"]: {
+            **repo,
+            "local": True,
+            "configured_hosts": [{"name": local_host, "state": "online"}],
+        }
+        for repo in local_repos
+    }
     remote = {}
     for record in machine_records:
         host = record.get("name")
@@ -623,6 +630,7 @@ def merge_repo_inventory(
                     "running_hosts": set(),
                     "enabled_hosts": set(),
                     "enable_hosts": set(),
+                    "configured_hosts": {},
                 },
             )
             is_enabled = item.get("enabled") is True
@@ -630,6 +638,11 @@ def merge_repo_inventory(
             entry["loopable"] |= item.get("loopable") is True
             label = f"{host} (offline)" if record.get("state") == "offline" else host
             entry["hosts"].add(label)
+            entry["configured_hosts"][host] = (
+                record.get("state")
+                if record.get("state") in ("online", "draining", "offline")
+                else "unknown"
+            )
             if record.get("state") == "online":
                 actions = record.get("actions", [])
                 if is_enabled and "loop.run" in actions:
@@ -640,10 +653,16 @@ def merge_repo_inventory(
                 entry["running_hosts"].add(host)
 
     for repo, entry in remote.items():
+        remote_hosts = [
+            {"name": host, "state": state}
+            for host, state in sorted(entry["configured_hosts"].items())
+        ]
         if repo in repos:
             repos[repo]["fleet_enabled"] = entry["enabled"]
             repos[repo]["enabled_hosts"] = sorted(entry["enabled_hosts"])
             repos[repo]["enable_hosts"] = sorted(entry["enable_hosts"])
+            repos[repo]["configured_hosts"].extend(remote_hosts)
+            repos[repo]["configured_hosts"].sort(key=lambda host: host["name"])
             continue
         state = "enabled" if entry["enabled"] else "disabled"
         repos[repo] = {
@@ -655,6 +674,7 @@ def merge_repo_inventory(
             "running": bool(entry["running_hosts"]),
             "running_machines": ", ".join(sorted(entry["running_hosts"])),
             "machine": ", ".join(sorted(entry["hosts"])),
+            "configured_hosts": remote_hosts,
             "enabled_hosts": sorted(entry["enabled_hosts"]),
             "enable_hosts": sorted(entry["enable_hosts"]),
         }
@@ -743,15 +763,18 @@ def _loop_hosts_from_heartbeat(machine_records: list[dict], local_host: str) -> 
 
 
 def gather_loops(connection: dict) -> dict:
-    """Return local Herdr state and remote Herdr heartbeat state."""
+    """Return loop state and configured repository inventory."""
     local_host = machines.hostname()
     local_states = _local_loop_states()
     enabled = set(enabled_repos())
     state = fleet_state(connection)
-    remote_states = _loop_hosts_from_heartbeat(state.get("machines", []), local_host)
+    machine_records = state.get("machines", [])
+    remote_states = _loop_hosts_from_heartbeat(machine_records, local_host)
+    local_repos = code_repos()
+    repo_inventory = merge_repo_inventory(local_repos, machine_records, local_host)
     entries = []
     # The server may have no /code. Loops that other machines report still count.
-    repo_names = {repo_info["repo"] for repo_info in code_repos()} | set(remote_states)
+    repo_names = {repo_info["repo"] for repo_info in local_repos} | set(remote_states)
     for repo in sorted(repo_names):
         entry = local_states.get(repo)
         machine = local_host
@@ -779,6 +802,7 @@ def gather_loops(connection: dict) -> dict:
     entries.sort(key=lambda entry: entry["repo"])
     return {
         "entries": entries,
+        "repos": repo_inventory,
         "machines": state.get("machines", []),
         "claims": state.get("claims", {}),
         "fleet_error": state.get("fleet_error"),
@@ -1112,6 +1136,20 @@ background:var(--code)}
 .loops-row{display:block;padding:.3rem .2rem;color:inherit}
 .loops-row.sel{font-weight:700}
 .loops-group{color:var(--ink3);margin-top:.6rem;font-size:.8rem}
+.loops-groupby{display:flex;align-items:center;justify-content:space-between;
+gap:.5rem;margin-bottom:.4rem}
+.loops-group-label{font-size:.72rem;letter-spacing:.06em;text-transform:uppercase}
+.loops-group-toggle{display:inline-flex;border:1px solid var(--line);
+border-radius:10px;overflow:hidden;background:var(--side);font-size:.82rem}
+.loops-group-option{display:block;padding:.3rem .6rem;color:var(--ink2)}
+.loops-group-option:hover{text-decoration:none}
+.loops-group-option[aria-current=page]{background:var(--surface);color:var(--ink);
+font-weight:600}
+.loops-group-option:focus-visible{outline:2px solid var(--ok);outline-offset:-2px}
+@media(max-width:860px){
+.loops-shell{flex-direction:column;align-items:stretch}
+.loops-side{width:100%}
+}
 .err{color:#9b2226}
 """
 
@@ -2876,12 +2914,34 @@ def render_loops(
     entries = data["entries"]
     local_host = data["local_host"]
     fleet_machines = data.get("machines", [])
+    configured_repo_names = {repo["repo"] for repo in data.get("repos", [])}
+    entry_repo_names = {entry["repo"] for entry in entries}
+    configured_only = sorted(configured_repo_names - entry_repo_names)
+    repo_inventory = {repo["repo"]: repo for repo in data.get("repos", [])}
+
+    def unavailable_message(repo: str) -> str | None:
+        hosts = [
+            host
+            for host in repo_inventory.get(repo, {}).get("configured_hosts", [])
+            if host.get("state") not in ("online", "draining")
+        ]
+        if not hosts:
+            return None
+        details = ", ".join(
+            f"{host.get('name') or 'unknown'} ({host.get('state') or 'unknown'})"
+            for host in hosts
+        )
+        return f"Loop state unavailable: {details}."
+
     selected = next((e for e in entries if e["repo"] == selected_repo), None)
 
     def row(entry: dict) -> str:
         sel = " sel" if entry["repo"] == selected_repo else ""
         dot = LOOP_STATUS_DOT.get(entry["status"], "idle")
+        unavailable = unavailable_message(entry["repo"])
         label = LOOP_STATUS_LABEL.get(entry["status"], entry["status"])
+        if entry["status"] == "stopped":
+            label = "State unavailable" if unavailable else "No active loops"
         return (
             f"<a class='loops-row{sel}' href='{_loops_url(entry['repo'], group, lines)}'>"
             f"<span class='dot {dot}'></span> {esc(entry['repo'])} "
@@ -2889,34 +2949,62 @@ def render_loops(
         )
 
     side = [
-        "<div class=row style='margin-bottom:.4rem'>",
-        f"<a href='/loops?group=repo&repo={quote(selected_repo, safe='')}&lines={lines}'>by repo</a>",
-        " &middot; ",
-        f"<a href='/loops?group=machine&repo={quote(selected_repo, safe='')}&lines={lines}'>by machine</a>",
-        "</div>",
+        "<div class=loops-groupby>",
+        "<span class='dim loops-group-label'>Group by</span>",
+        "<nav class=loops-group-toggle aria-label='Group loops by'>",
+        (
+            f"<a class=loops-group-option href='/loops?group=repo&repo={quote(selected_repo, safe='')}&lines={lines}'"
+            f"{' aria-current=page' if group == 'repo' else ''}>Repo</a>"
+        ),
+        (
+            f"<a class=loops-group-option href='/loops?group=machine&repo={quote(selected_repo, safe='')}&lines={lines}'"
+            f"{' aria-current=page' if group == 'machine' else ''}>Machine</a>"
+        ),
+        "</nav></div>",
     ]
-    if not entries:
-        side.append("<p class=dim>No loopable repos found.</p>")
+    if not entries and not configured_only:
+        side.append("<p class=dim>No repositories found.</p>")
     elif group == "machine":
-        by_machine: dict[str, list[dict]] = {}
-        for entry in entries:
-            by_machine.setdefault(entry["machine"], []).append(entry)
-        # Include machines named by loop state, even when they are not in
-        # the registry.
-        known = sorted({m["name"] for m in fleet_machines} | {local_host} | {e["machine"] for e in entries})
-        for name in known:
-            label = "this machine" if name == local_host else name
-            side.append(f"<div class=loops-group>{esc(label)}</div>")
-            rows = by_machine.get(name, [])
-            if not rows:
-                side.append("<p class=dim style='margin:.2rem 0 0 .8rem'>no loop visible from here</p>")
-            side.extend(row(entry) for entry in rows)
+        if entries:
+            by_machine: dict[str, list[dict]] = {}
+            for entry in entries:
+                by_machine.setdefault(entry["machine"], []).append(entry)
+            # Include machines named by loop state, even when they are not in
+            # the registry.
+            known = sorted({m["name"] for m in fleet_machines} | {local_host} | {e["machine"] for e in entries})
+            for name in known:
+                label = "this machine" if name == local_host else name
+                side.append(f"<div class=loops-group>{esc(label)}</div>")
+                rows = by_machine.get(name, [])
+                if not rows:
+                    side.append("<p class=dim style='margin:.2rem 0 0 .8rem'>no loop visible from here</p>")
+                side.extend(row(entry) for entry in rows)
+        if configured_only:
+            side.append("<div class=loops-group>Configured repositories</div>")
+            side.extend(row({"repo": repo, "status": "stopped"}) for repo in configured_only)
     else:
         side.extend(row(entry) for entry in entries)
+        side.extend(row({"repo": repo, "status": "stopped"}) for repo in configured_only)
 
     main = ["<div class=card>"]
     if selected is None:
-        main.append("<p class=dim>Select a loop.</p>")
+        if selected_repo and selected_repo in configured_repo_names:
+            main.append(f"<div class=row><span class=big>{esc(selected_repo)}</span></div>")
+            unavailable = unavailable_message(selected_repo)
+            detail = esc(unavailable) if unavailable else "No active loops."
+            main.append(f"<p class=dim>{detail}</p>")
+        elif not entries and configured_repo_names:
+            unavailable = None
+            for repo in sorted(configured_repo_names):
+                unavailable = unavailable_message(repo)
+                if unavailable:
+                    break
+            detail = esc(unavailable) if unavailable else "No active loops."
+            main.append(f"<p class=dim>{detail}</p>")
+        elif not entries:
+            main.append("<p class=dim>No repositories found.</p>")
+        else:
+            main.append("<p class=dim>Select a loop.</p>")
     else:
         main.append(
             "<div class=row>"
@@ -2966,7 +3054,9 @@ def render_loops(
                 else:
                     main.append(f"<p class=dim>No SSH target is set for {esc(selected['machine'])}.</p>")
         elif selected["status"] == "stopped":
-            main.append("<p class=dim>Not running.</p>")
+            unavailable = unavailable_message(selected["repo"])
+            detail = esc(unavailable) if unavailable else "No active loops."
+            main.append(f"<p class=dim>{detail}</p>")
         else:
             main.append("<p class=dim>State cannot be verified; actions are disabled.</p>")
         main.append("<div class=row style='margin-top:1rem'>")
@@ -3816,9 +3906,12 @@ class Handler(BaseHTTPRequestHandler):
         entries = data["entries"]
         selected_repo = (query.get("repo") or "").strip()
         selected = next((e for e in entries if e["repo"] == selected_repo), None)
-        if selected is None and entries and not selected_repo:
-            selected = entries[0]
-            selected_repo = selected["repo"]
+        if selected is None and not selected_repo:
+            if entries:
+                selected = entries[0]
+                selected_repo = selected["repo"]
+            elif data.get("repos"):
+                selected_repo = data["repos"][0]["repo"]
 
         tail = None
         if (

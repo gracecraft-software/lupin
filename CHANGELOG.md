@@ -24,6 +24,9 @@ All notable changes to Lupin. The version has one source:
 
 ### Fixed
 
+- The Loops page shows configured repositories and reports unavailable when a
+  configured host is offline or unknown. It keeps Repo or Machine grouping and
+  stacks the list and details on small screens.
 - The Roadmap page family uses one set of stage words (In progress, Ready,
   Later, Blocked) on the board, the list, the detail panel and the queue
   graph. The empty states keep the selected repositories visible, the note
