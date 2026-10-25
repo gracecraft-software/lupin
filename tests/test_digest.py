@@ -102,6 +102,36 @@ def test_make_digest_returns_text_with_a_code_fence_removed(monkeypatch):
     assert "widgets" in seen["argv"][-1] and "# Debrief" in seen["argv"][-1]
 
 
+def test_make_digest_uses_the_detailed_owner_blocked_prompt(monkeypatch):
+    seen = _run_returning(
+        monkeypatch,
+        stdout="# Daily owner-blocked brief\n## Executive summary\n\nOne issue needs a decision.",
+        candidates=(("openai-codex/gpt-6-luna", "xhigh"),),
+    )
+    raw = """# Daily owner-blocked report: acme/lupin
+- Period: owner-blocked
+## Owner-blocked issues
+- Owner-blocked issues: 1.
+- Issue #14: Choose the retention period
+- URL: https://github.com/acme/lupin/issues/14
+## Pull requests waiting for owner merge
+- None.
+## Data gaps
+- None.
+"""
+
+    digest.make_digest("lupin", "20261010-070000-owner-blocked.md", raw)
+
+    prompt = seen["argv"][-1]
+    assert "## Executive summary" in prompt
+    assert "## Decisions and actions" in prompt
+    assert "## Strategy" in prompt
+    assert "Issue #14" in prompt and "https://github.com/acme/lupin/issues/14" in prompt
+    assert "exact URL from the report as plain text" in prompt
+    assert "Include every listed item" in prompt
+    assert "one or two short paragraphs" not in prompt
+
+
 @pytest.mark.parametrize(
     "kwargs, message",
     [
@@ -815,15 +845,22 @@ def test_read_image_returns_nothing_when_redis_fails():
 
 @pytest.mark.parametrize(
     "name, period",
-    [("20261010-120000-12h.md", "12h"), ("20261005-070000-7d.md", "7d"), ("20261010-120000-6h.md", "6h"),
-     ("20261010-120000-24h.md", "24h"), ("20261010-120000.md", ""), ("20261010-000000-day.md", "day")],
+    [
+        ("20261010-120000-12h.md", "12h"),
+        ("20261005-070000-7d.md", "7d"),
+        ("20261010-120000-6h.md", "6h"),
+        ("20261010-120000-24h.md", "24h"),
+        ("20261010-120000.md", ""),
+        ("20261010-000000-day.md", "day"),
+        ("20261010-070000-owner-blocked.md", "owner-blocked"),
+    ],
 )
 def test_period_of_reads_the_period_from_the_file_name(name, period):
     assert digest.period_of(name) == period
 
 
 @pytest.mark.parametrize("name", ["20261010-120000-6h.md", "20261010-120000-24h.md", "20261010-120000.md", "20261010-000000-day.md"])
-def test_a_debrief_that_is_not_a_12h_or_7d_window_is_a_record_with_no_model_call(tmp_path, redis_port, flush_redis, name):
+def test_a_record_only_debrief_gets_no_model_call(tmp_path, redis_port, flush_redis, name):
     _write(tmp_path, "widgets", name)
     calls = []
 
@@ -843,6 +880,36 @@ def test_a_12h_or_7d_window_gets_a_digest(tmp_path, redis_port, flush_redis, nam
 
     assert calls == [("widgets", name)]
     assert digest.read_one("jesus", "widgets", name, **_kw(redis_port))["digest"]
+
+
+def test_a_daily_owner_blocked_report_gets_a_digest_without_becoming_record_only(
+    tmp_path, redis_port, flush_redis,
+):
+    name = "20261010-070000-owner-blocked.md"
+    raw = """# Daily owner-blocked report: acme/lupin
+- Period: owner-blocked
+## Owner-blocked issues
+- Owner-blocked issues: 1.
+### Issue #14: Choose the retention period
+## Pull requests waiting for owner merge
+- None.
+## Data gaps
+- None.
+"""
+    _write(tmp_path, "lupin", name, raw)
+    calls = []
+
+    def make(repo, filename, source):
+        calls.append((repo, filename, source))
+        return "# Daily owner-blocked brief\n\nOne decision is needed.", "openai-codex/gpt-6-luna"
+
+    digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=make, now=NOW)
+
+    entry = digest.read_one("jesus", "lupin", name, **_kw(redis_port))
+    assert calls == [("lupin", name, raw)]
+    assert entry["record_only"] is False
+    assert entry["model"] == "openai-codex/gpt-6-luna"
+    assert "One decision is needed." in entry["digest"]
 
 
 def test_a_record_only_entry_is_not_rewritten_on_every_cycle(tmp_path, redis_port, flush_redis):

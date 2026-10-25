@@ -25,6 +25,7 @@ GITHUB_CACHE_SECONDS = 60 * 60
 GRAPHQL = """query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){issues(first:100,after:$cursor,states:OPEN,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number comments(last:20){nodes{body createdAt url author{login}}}} pageInfo{hasNextPage endCursor}}}}"""
 IMAGE = re.compile(r"!\[([^\]]*)\]\((https://[^)\s]+)\)")
 ATTACHMENT_ID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+OWNER_BLOCKED_LABEL = "completely-blocked-on-human"
 ATTACHMENT_PATH = "/user-attachments/assets/"
 
 # The note under the board and under the per-repository graph. Plain words,
@@ -719,7 +720,7 @@ def build_model(
 
     def held(node):
         return node["decision"] or node["unresolvedDependency"] or any(
-            label.casefold() in {"owner-todo", "needs-decision", "completely-blocked-on-human", "epic"}
+            label.casefold() in {"owner-todo", "needs-decision", OWNER_BLOCKED_LABEL, "epic"}
             for label in node["labels"]
         )
 
@@ -758,7 +759,7 @@ def build_model(
     }
     owner_blocked_ids = {
         node["number"] for node in nodes
-        if any(label.casefold() == "completely-blocked-on-human" for label in node["labels"])
+        if any(label.casefold() == OWNER_BLOCKED_LABEL for label in node["labels"])
     }
     waiting_ids -= owner_blocked_ids
     groups = [

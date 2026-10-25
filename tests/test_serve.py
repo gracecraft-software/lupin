@@ -4625,7 +4625,7 @@ def test_image_route_falls_back_to_github_when_redis_has_no_copy(monkeypatch, re
     assert asked == ["eba1e250-ae34-481a-9f8c-98503030f83e"] and handler.wfile.getvalue() == b"gh-bytes"
 
 
-def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_says_it_is_a_record(tmp_path, monkeypatch, redis_port, flush_redis):
+def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_page_says_no_digest(tmp_path, monkeypatch, redis_port, flush_redis):
     from lupin import digest as digest_mod
 
     monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
@@ -4641,4 +4641,4 @@ def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_s
     page.do_GET()
 
     assert "no digest" not in index.reply.call_args.args[0].decode()
-    assert "This is a record" in page.reply.call_args.args[0].decode()
+    assert "This debrief is a record without a digest." in page.reply.call_args.args[0].decode()

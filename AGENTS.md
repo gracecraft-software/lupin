@@ -195,8 +195,8 @@ also reads the systemd unit, the last 20 pane lines, and the newest handoff from
 this run. If Herdr does not list the loop's own pane, the Herdr state is
 `unknown`. The first rule that matches gives the verdict:
 
-1. `stopped`, reason "waiting for the owner". Herdr says `blocked`, or the Lupin
-   state is `needs_attention`. The loop is flagged. No nudge.
+1. `stopped`. Herdr says `blocked`, or the Lupin state is `needs_attention`.
+   The loop is flagged. No nudge. The reason is `blocked, research needed`.
 2. `stopped`. Work is left, and the unit is `inactive` or `failed`. The loop is
    flagged. A nudge is sent only when Herdr says `idle` or `done`.
 3. `busywork`. Herdr says `working`, and the pane text matches the last pass.
@@ -308,10 +308,16 @@ says when data is missing. It never calls missing data an empty result. A period
 with no change gets no digest, and the page says "no changes". A digest is a
 short story with up to 3 pictures, not a PR list. Periodic debriefs use fixed
 windows on the Los Angeles clock. The first machine to claim a window in Redis
-writes it. Only the 12-hour and 7-day windows get a digest. The other debriefs
-(6h, 24h, loop stops) are records only. The Debriefs page (`/debrief`) shows the
-debriefs of all workers. Redis holds text only. A screenshot file stays on its
-worker. A GitHub attachment image is shown through the dashboard.
+writes it. Only the 12-hour, 7-day, and daily owner-blocked reports are
+eligible for a digest.
+The owner-blocked report runs for Lupin's own repo. It lists open issues with
+the `completely-blocked-on-human` label and open, non-draft PRs that are
+mergeable, approved at the current head, and have passing checks. Other 6-hour,
+24-hour, and loop-stop debriefs are records only. The owner-blocked report uses
+the 24-hour window, but has its own claim and file. The Debriefs page (`/debrief`)
+shows debriefs from all workers and links each issue and PR. Redis holds text
+only. Screenshot files stay on their worker. The owner-blocked report does not
+capture screenshots. A GitHub attachment image is shown through the dashboard.
 
 The digest uses these models in order: bmo (`bmo:qwen3.8-flash-next`, tier0 in
 `model-tiers.json`), then `opencode-go/deepseek-v4.1-flash`, then Claude
@@ -510,6 +516,7 @@ not add controls that the current code cannot support.
 - `src/lupin/claims.py`: `claim`, `renew-claim`, `release-claim`.
 - `src/lupin/dispatch.py`: `dispatch`.
 - `src/lupin/digest.py`: writes a digest for each debrief.
+- `src/lupin/owner_blocked.py`: builds Lupin's daily owner-blocked report.
 - `src/lupin/ledger.py`: appends and reads shared repo events.
 - `src/lupin/machines.py`: `join`, `heartbeat`, `drain`, `undrain`, `machines`.
 - `src/lupin/loops.py`: signed local or remote dispatch for loop controls.

@@ -32,7 +32,7 @@ from . import machines
 from .slots import CoordinatorUnreachable
 
 PR_FIELDS = (
-    "number,title,body,isDraft,headRefName,headRefOid,mergeable,"
+    "number,title,body,updatedAt,isDraft,headRefName,headRefOid,mergeable,"
     "reviewDecision,reviews,comments,statusCheckRollup,reviewRequests"
 )
 
@@ -108,7 +108,7 @@ def _resolve_repo():
     return repo, None
 
 
-def _fetch_prs(repo: str):
+def fetch_open_prs(repo: str):
     """Fetch every open pull request with one `gh pr list` call."""
     return _run_gh_json(
         [
@@ -472,7 +472,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"lupin: {_redact(error)}", file=sys.stderr)
             return 1
 
-    prs, error = _fetch_prs(repo)
+    prs, error = fetch_open_prs(repo)
     if error:
         print(f"lupin: {_redact(error)}", file=sys.stderr)
         return 1

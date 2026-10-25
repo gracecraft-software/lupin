@@ -232,13 +232,13 @@ def test_lupin_needs_attention_wins_over_a_working_pane(monkeypatch):
 
 
 @pytest.mark.parametrize("state", ["blocked", "needs_attention"])
-def test_loop_waiting_for_the_owner_is_flagged_and_never_nudged(tmp_path, state):
+def test_blocked_loop_reports_research_needed_and_is_never_nudged(tmp_path, state):
     fakes = Fakes(tmp_path, [_loop(state=state)])
 
     report = supervise.run_pass(**fakes.kwargs())
 
     row = report["loops"][0]
-    assert (row["verdict"], row["nudge"], row["reason"]) == ("stopped", "none", "waiting for the owner")
+    assert (row["verdict"], row["nudge"], row["reason"]) == ("stopped", "none", "blocked, research needed")
     assert fakes.nudges == []
     assert fakes.ledger[0][1]["status"] == "flagged"
 

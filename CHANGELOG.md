@@ -7,6 +7,8 @@ All notable changes to Lupin. The version has one source:
 
 ### Added
 
+- Lupin's daily owner-blocked report links blocked issues and ready-to-merge
+  pull requests, then gives the owner a detailed action plan.
 - `lupin logs` shows events from a loop run. Lupin keeps up to 20 logs per
   repo and removes logs older than 30 days.
 - `lupin --version` prints the package version. The flake reads the same
@@ -21,6 +23,7 @@ All notable changes to Lupin. The version has one source:
 - `lupin run` starts from `origin/HEAD`, or else `origin/main`. It no longer
   checks `origin/release/next` or `origin/master`, and CI no longer lists
   `release/next`.
+- Blocked supervisor rows say `blocked, research needed` and get no prompt.
 
 ### Fixed
 

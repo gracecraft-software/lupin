@@ -3,11 +3,14 @@
 A debrief is one markdown file. A loop stop writes one. The agent writes
 periodic debriefs (`PERIODS`) on a timer. Facts come from GitHub (`gh`).
 The ledger lists shared repository events. A claim marks an issue that one loop
-is working on. A normal stop and a periodic debrief also read the ledger and
-issue claims in Redis. A forced stop does not. Files stay on the machine that
-wrote them. Periodic debriefs use fixed windows (`window_end`), and one machine in the
-fleet writes each window (`claim_window`). A periodic debrief also gets screenshots of its dashboard pages.
-A stop debrief does not.
+is working on. A normal stop and standard periodic debriefs also read the
+ledger and issue claims in Redis. A forced stop does not. Files stay on the
+machine that wrote them.
+The standard periodic debriefs use fixed windows (`window_end`). One machine
+in the fleet writes each window (`claim_window`) and captures two dashboard
+screenshots. The daily owner-blocked report shares the 24-hour window but uses
+its own claim and file. It does not capture screenshots. A stop debrief does
+not capture screenshots.
 """
 
 from __future__ import annotations
@@ -59,12 +62,11 @@ _HOUR_STEPS = {"6h": 6, "12h": 12, "24h": 24}
 WINDOW_GRACE_S = 180  # A window is written this long after it ends. A fast clock or a late GitHub search must not cut it.
 WINDOW_WRITING_S = 3600  # A claim not finished in this time is free again. The writer may have crashed.
 WINDOW_DONE_S = 8 * 24 * 60 * 60  # Longer than the longest window (7d), so a late machine does not repeat it.
-# A backfill file covers one UTC day. Its name ends in `-day.md`. `DAY` is not
-# in `PERIODS`, so `window_due` never sees these files.
+# A backfill file covers one UTC day. Its name ends in `-day.md`.
+# The daily owner-blocked report uses the 24-hour window, but has its own file.
 DAY = "day"
-_PERIOD_NAMES = "|".join(map(re.escape, [*PERIODS, DAY]))
-# Stop files are `<file name time>.md`. Periodic files are `<file name time>-<period>.md`.
-# Backfill files are `<file name time>-day.md`. The file name time is the end of the day.
+OWNER_BLOCKED_PERIOD = "owner-blocked"
+_PERIOD_NAMES = "|".join(map(re.escape, [*PERIODS, DAY, OWNER_BLOCKED_PERIOD]))
 FILE_RE = re.compile(rf"^\d{{8}}-\d{{6}}(?:-(?:{_PERIOD_NAMES}))?\.md$")
 # Screenshot links in a periodic debrief. `_screenshots` writes this shape only.
 SHOT_PATH_RE = re.compile(
@@ -72,6 +74,10 @@ SHOT_PATH_RE = re.compile(
 )
 # Image link: a GitHub attachment URL or a screenshot path. Group 2 is the target.
 IMAGE_LINK_RE = re.compile(rf"!\[([^\]]*)\]\((https://[^)\s]+|{SHOT_PATH_RE.pattern})\)")
+GITHUB_ITEM_URL_RE = re.compile(
+    r"https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"
+    r"/(?:issues|pull)/\d+(?![A-Za-z0-9._/-])"
+)
 EVIDENCE_DIRS = ("docs/", "evidence/")
 EVIDENCE_TYPES = {
     ".png": "image/png",
@@ -810,6 +816,55 @@ def write_window(
     return _write(root, repo, checkout, start, end, forced=False, period=period)
 
 
+def owner_blocked_window_due(root: Path, repo: str, now: datetime) -> bool:
+    """Return True when this machine has no owner-blocked report for today's LA window."""
+    if not REPO_RE.fullmatch(repo or ""):
+        raise DebriefError(f"invalid repo name {repo!r}")
+    end = finished_window_end("24h", now)
+    name = f"{end.strftime(STAMP_FORMAT)}-{OWNER_BLOCKED_PERIOD}.md"
+    return not (root / "debriefs" / repo / name).exists()
+
+
+def write_owner_blocked_window(
+    root: Path, repo: str, checkout: Path, *, now: datetime | None = None,
+) -> Path:
+    """Write the daily owner-blocked report for the newest finished LA day."""
+    if not REPO_RE.fullmatch(repo or ""):
+        raise DebriefError(f"invalid repo name {repo!r}")
+    when = datetime.now(timezone.utc) if now is None else now
+    end = finished_window_end("24h", when)
+    start = window_start("24h", end)
+    if not checkout.is_dir():
+        raise DebriefError(f"no checkout at {checkout}")
+    view = _TimeLimit(PERIODIC_TIME_LIMIT_S).gh(
+        ["repo", "view", "--json", "nameWithOwner"], cwd=str(checkout)
+    )
+    full_name = view.get("nameWithOwner") if isinstance(view, dict) else None
+    if not isinstance(full_name, str) or not full_name:
+        raise DebriefError("gh did not name the repository")
+
+    from . import owner_blocked
+
+    host, port, username, password = _redis_connection()
+    text = owner_blocked.collect_markdown(
+        str(checkout),
+        full_name,
+        _window_time(start),
+        _window_time(end),
+        connection={
+            "redis_host": host,
+            "redis_port": port,
+            "redis_username": username,
+            "redis_password": password,
+        },
+    )
+    folder = root / "debriefs" / repo
+    folder.mkdir(parents=True, exist_ok=True, mode=0o750)
+    path = folder / f"{end.strftime(STAMP_FORMAT)}-{OWNER_BLOCKED_PERIOD}.md"
+    _store(path, text)
+    return path
+
+
 def write_day(root: Path, repo: str, checkout: Path, day: datetime) -> Path:
     """Write the backfill debrief for one UTC day and return its path.
 
@@ -910,28 +965,36 @@ def _image_src(target: str, repo: str) -> str | None:
     return "/debrief/shot?" + escape(urlencode({"repo": repo, "path": target}), quote=True)
 
 
+def _escaped_text(text: str) -> str:
+    escaped = escape(text)
+    return GITHUB_ITEM_URL_RE.sub(
+        lambda match: f"<a href='{match.group(0)}'>{match.group(0)}</a>",
+        escaped,
+    )
+
+
 def _inline(text: str, repo: str) -> str:
     parts = []
     position = 0
     for match in IMAGE_LINK_RE.finditer(text):
-        parts.append(escape(text[position:match.start()]))
+        parts.append(_escaped_text(text[position:match.start()]))
         src = _image_src(match.group(2), repo)
         if src:
             alt = escape(match.group(1), quote=True)
             parts.append(f"<img src='{src}' alt='{alt}' loading=lazy>")
         else:
-            parts.append(escape(match.group(0)))
+            parts.append(_escaped_text(match.group(0)))
         position = match.end()
-    parts.append(escape(text[position:]))
+    parts.append(_escaped_text(text[position:]))
     return "".join(parts)
 
 
 def render_html(markdown: str, repo: str) -> str:
     """Render the debrief markdown subset as HTML.
 
-    Headings, bullets, paragraphs and images only. Images are GitHub
-    attachments or this repo's screenshots. All other text is escaped.
-    Links show as text.
+    Headings, bullets, paragraphs, images, and GitHub issue and PR URLs.
+    Images are GitHub attachments or this repo's screenshots. Other links
+    and all text are escaped.
     """
     out = []
     in_list = False

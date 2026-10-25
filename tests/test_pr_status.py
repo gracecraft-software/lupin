@@ -487,7 +487,7 @@ class PreviewTests(unittest.TestCase):
 class MainTests(unittest.TestCase):
     def _run(self, argv, prs, claims=None, warning=None):
         stdout = io.StringIO()
-        with mock.patch.object(pr_status, "_fetch_prs", return_value=(prs, None)), \
+        with mock.patch.object(pr_status, "fetch_open_prs", return_value=(prs, None)), \
              mock.patch.object(pr_status, "_read_claims", return_value=(claims or {}, warning)), \
              contextlib.redirect_stdout(stdout):
             code = pr_status.main(["--repo", "o/r", *argv])
@@ -588,7 +588,7 @@ class MainTests(unittest.TestCase):
             self.assertIn(field, row)
 
     def test_connection_flags_are_passed_to_the_claim_read(self):
-        with mock.patch.object(pr_status, "_fetch_prs", return_value=([], None)), \
+        with mock.patch.object(pr_status, "fetch_open_prs", return_value=([], None)), \
              mock.patch.object(pr_status, "_read_claims", return_value=({}, None)) as read, \
              contextlib.redirect_stdout(io.StringIO()):
             code = pr_status.main(
@@ -661,7 +661,7 @@ class MainTests(unittest.TestCase):
         stderr = io.StringIO()
         with mock.patch.object(
             pr_status,
-            "_fetch_prs",
+            "fetch_open_prs",
             return_value=(None, "fatal: token ghp_supersecret rejected"),
         ), contextlib.redirect_stderr(stderr):
             code = pr_status.main(["--repo", "o/r"])
@@ -671,7 +671,7 @@ class MainTests(unittest.TestCase):
 
     def test_default_repo_uses_gh_resolution(self):
         with mock.patch.object(pr_status, "_resolve_repo", return_value=("o/r", None)), \
-             mock.patch.object(pr_status, "_fetch_prs", return_value=([], None)) as fetch, \
+             mock.patch.object(pr_status, "fetch_open_prs", return_value=([], None)) as fetch, \
              mock.patch.object(pr_status, "_read_claims", return_value=({}, None)), \
              contextlib.redirect_stdout(io.StringIO()):
             code = pr_status.main([])
@@ -680,7 +680,7 @@ class MainTests(unittest.TestCase):
 
     def test_unreachable_redis_keeps_the_command_alive(self):
         stdout = io.StringIO()
-        with mock.patch.object(pr_status, "_fetch_prs", return_value=([_pr()], None)), \
+        with mock.patch.object(pr_status, "fetch_open_prs", return_value=([_pr()], None)), \
              mock.patch.object(pr_status.machines, "resolve_connection", return_value={}), \
              mock.patch.object(
                  pr_status.claims, "claims_for", side_effect=CoordinatorUnreachable("down")

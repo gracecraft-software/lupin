@@ -21,8 +21,9 @@ are `verdict` in `src/lupin/supervise.py`. It sends `NUDGE_TEXT` only when the
 Herdr state is `idle` or `done`. It sends at most one nudge per repo each hour.
 It writes one `supervise` ledger event per repo. A `stopped` verdict does not
 block a nudge. An idle loop is `stopped` if its unit is inactive or if it asks
-to continue. It still gets the nudge. A `blocked` or `needs_attention` pane gets
-no text. Its verdict is `stopped` with the reason "waiting for the owner".
+to continue. A `blocked` or `needs_attention` pane gets no text. Its verdict is
+`stopped` with the reason `blocked, research needed`. The Debriefs page includes
+the daily owner-blocked report.
 
 ## Decide: owner decision or not
 
@@ -48,11 +49,12 @@ It gathers information and writes an informed report. It does not change code, i
    ```
 
 2. If the pane shows `Awaiting owner input`, read the question. Apply "Decide".
-3. Owner decision: record `owner-decision`. Put one short question, with its
-   options, in the handoff.
-4. Not an owner decision: Herdr rejects a prompt to a blocked pane with
-   `agent_blocked`. Record the question, PANE_ID, and time. Retry on the next
-   pass. Issue #271 covers this gap.
+3. Owner decision: write the question in an issue comment that starts with
+   `Loop:` and names its options. Record `owner-decision` and put the question
+   in the handoff.
+4. For any other block, do not prompt the pane. The supervisor reports
+   `blocked, research needed`. Record the question, pane ID, and time. Dispatch a
+   research worker on the next pass and act on its result.
 
 ## Sending the rule by hand
 

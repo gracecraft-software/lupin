@@ -110,3 +110,15 @@ Rule 1 above applies. Before you dispatch anything, check for work already done:
 git -C <checkout> fetch origin
 git -C <checkout> branch --no-merged origin/main
 ```
+
+## Blocked tasks
+
+When a task seems blocked, delegate a research worker first. Act on its result.
+Wait for the owner only for credentials, money, hardware, a product choice, or
+an action the repo rules reserve for a person. Ask with an issue comment that
+starts with `Loop:` and lists the options.
+
+For another block, retry a transient error three times, five minutes apart.
+Then use the documented fallback. If no competent model is affordable, research
+lower-cost options before you defer the task. Record the reason and take the
+next item. Do not wait with no next action.

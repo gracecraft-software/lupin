@@ -515,12 +515,15 @@ def test_write_debrief_refuses_and_writes_nothing(tmp_path: Path, repo, started_
     assert not (tmp_path / "debriefs").exists()
 
 
-def test_render_html_escapes_text_and_keeps_only_attachment_images():
+def test_render_html_escapes_text_and_links_only_github_issues_and_prs():
     markdown = "\n".join([
         "# Debrief: acme/widgets",
         "- Issue #5: <script>alert(1)</script> title",
         f"- Issue #5: ![shot]({_url(UUID_A)})",
         "- Issue #8: ![bad](https://example.com/x.png)",
+        "- Issue URL: https://github.com/acme/widgets/issues/8",
+        "- PR URL: https://github.com/acme/widgets/pull/19",
+        "- External URL: https://example.com/issues/8",
     ])
 
     html = debrief.render_html(markdown, "widgets")
@@ -530,6 +533,16 @@ def test_render_html_escapes_text_and_keeps_only_attachment_images():
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert f"<img src='/image?id={UUID_A}'" in html
     assert "![bad](https://example.com/x.png)" in html
+    assert (
+        "<a href='https://github.com/acme/widgets/issues/8'>"
+        "https://github.com/acme/widgets/issues/8</a>" in html
+    )
+    assert (
+        "<a href='https://github.com/acme/widgets/pull/19'>"
+        "https://github.com/acme/widgets/pull/19</a>" in html
+    )
+    assert "External URL: https://example.com/issues/8" in html
+    assert '<a href="https://example.com/issues/8"' not in html
     assert html.count("<img") == 1
 
 
@@ -1878,3 +1891,85 @@ def test_a_periodic_window_still_stops_at_its_own_limit(tmp_path: Path, monkeypa
 
     assert "time limit reached" in path.read_text(encoding="utf-8")
     assert clock.now == 10.0
+
+
+def test_owner_blocked_report_uses_the_daily_la_window(tmp_path: Path):
+    end = _utc(2026, 10, 10, 7)
+    before_grace = end + timedelta(seconds=debrief.WINDOW_GRACE_S - 1)
+    at_grace = end + timedelta(seconds=debrief.WINDOW_GRACE_S)
+    previous_end = debrief.finished_window_end("24h", before_grace)
+    _debrief_file(
+        tmp_path,
+        "lupin",
+        f"{previous_end:%Y%m%d-%H%M%S}-{debrief.OWNER_BLOCKED_PERIOD}.md",
+    )
+
+    assert debrief.owner_blocked_window_due(tmp_path, "lupin", before_grace) is False
+    assert debrief.owner_blocked_window_due(tmp_path, "lupin", at_grace) is True
+
+
+def test_daily_owner_blocked_report_is_claimed_published_and_not_duplicated(
+    tmp_path: Path, monkeypatch, redis_port, flush_redis,
+):
+    from lupin import digest, pr_status, roadmap
+
+    issue = {
+        "number": 14,
+        "title": "Choose the retention period",
+        "body": "Choose 30 or 90 days.",
+        "labels": [{"name": roadmap.OWNER_BLOCKED_LABEL}],
+        "updatedAt": "2026-10-10T06:00:00Z",
+    }
+    comment = {"author": "owner", "createdAt": "2026-10-10T06:30:00Z", "body": "Choose 30 days."}
+    monkeypatch.setattr(
+        debrief._TimeLimit,
+        "gh",
+        lambda _self, _args, cwd=None: {"nameWithOwner": "acme/lupin"},
+    )
+    monkeypatch.setattr(
+        roadmap,
+        "load_github",
+        lambda _repo_path, connection=None: ([issue], {14: [comment]}, []),
+    )
+    monkeypatch.setattr(pr_status, "fetch_open_prs", lambda _full_name: ([], None))
+
+    def no_model(*_args, **_kwargs):
+        raise AssertionError("writing and publishing the report must not call a model")
+
+    monkeypatch.setattr(digest, "make_digest", no_model)
+    monkeypatch.setattr(digest, "_fetch_image", no_model)
+
+    first_state = _fleet_machine(tmp_path, monkeypatch, redis_port, "jesus")
+    (loop_runtime.CODE_DIR / "lupin").mkdir()
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"lupin": "openai-codex"})
+    for period in debrief.PERIODS:
+        end = debrief.finished_window_end(period, NOW)
+        _debrief_file(first_state, "lupin", f"{end:%Y%m%d-%H%M%S}-{period}.md")
+
+    loop_runtime.write_due_periodic_debriefs(now=NOW)
+
+    end = debrief.finished_window_end("24h", NOW)
+    name = f"{end:%Y%m%d-%H%M%S}-{debrief.OWNER_BLOCKED_PERIOD}.md"
+    path = first_state / "debriefs" / "lupin" / name
+    report = path.read_text(encoding="utf-8")
+    redis_client = redis.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    entry = digest.read_one("jesus", "lupin", name, redis_host="127.0.0.1", redis_port=redis_port)
+    assert "Issue #14: Choose the retention period" in report
+    assert "@owner" in report and "Choose 30 days." in report
+    assert "## Data gaps\n- None." in report
+    assert entry["raw"] == report and entry["record_only"] is False
+    assert entry["digest"] is None
+    assert redis_client.get(
+        debrief._window_key("lupin", debrief.OWNER_BLOCKED_PERIOD, end),
+    ) == "jesus:done"
+
+    second_state = _fleet_machine(tmp_path, monkeypatch, redis_port, "ralpha")
+    (loop_runtime.CODE_DIR / "lupin").mkdir()
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"lupin": "openai-codex"})
+    for period in debrief.PERIODS:
+        window_end = debrief.finished_window_end(period, NOW)
+        _debrief_file(second_state, "lupin", f"{window_end:%Y%m%d-%H%M%S}-{period}.md")
+
+    loop_runtime.write_due_periodic_debriefs(now=NOW + timedelta(minutes=1))
+
+    assert not (second_state / "debriefs" / "lupin" / name).exists()

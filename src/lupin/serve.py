@@ -3503,7 +3503,7 @@ class Handler(BaseHTTPRequestHandler):
                 "The full debrief is below.</p><hr>"
             )
         elif entry and entry.get("record_only"):
-            summary = "<p class=dim>This is a record. Digests cover the 12-hour and 7-day windows.</p>"
+            summary = "<p class=dim>This debrief is a record without a digest.</p>"
         elif entry and entry.get("quiet"):
             summary = "<p class=dim>Nothing changed in this period, so no digest was written.</p>"
         elif entry and entry.get("error"):

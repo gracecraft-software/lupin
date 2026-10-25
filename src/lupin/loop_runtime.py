@@ -1817,9 +1817,17 @@ def write_due_periodic_debriefs(now: datetime | None = None) -> None:
         checkout = CODE_DIR / repo
         if not checkout.is_dir():
             continue
-        for period in debrief.PERIODS:
+        periods = [(period, period) for period in debrief.PERIODS]
+        if repo == "lupin":
+            periods.append((debrief.OWNER_BLOCKED_PERIOD, "24h"))
+        for period, window_period in periods:
             try:
-                if not debrief.window_due(STATE_DIR, repo, period, now):
+                is_due = (
+                    debrief.owner_blocked_window_due(STATE_DIR, repo, now)
+                    if period == debrief.OWNER_BLOCKED_PERIOD
+                    else debrief.window_due(STATE_DIR, repo, period, now)
+                )
+                if not is_due:
                     continue
                 if not client_tried:
                     client_tried = True
@@ -1827,12 +1835,15 @@ def write_due_periodic_debriefs(now: datetime | None = None) -> None:
                         client = slots_redis.debrief_client(*debrief._redis_connection())
                     except (ValueError, OSError) as exc:  # A fleet config file that cannot be read.
                         print(f"lupin agent: debrief claims off: {exc}", file=sys.stderr)
-                end = debrief.finished_window_end(period, now)
+                end = debrief.finished_window_end(window_period, now)
                 if not debrief.claim_window(client, repo, period, end, machine):
                     continue  # Another machine writes this window.
                 written = False
                 try:
-                    debrief.write_window(STATE_DIR, repo, checkout, period, now=now)
+                    if period == debrief.OWNER_BLOCKED_PERIOD:
+                        debrief.write_owner_blocked_window(STATE_DIR, repo, checkout, now=now)
+                    else:
+                        debrief.write_window(STATE_DIR, repo, checkout, period, now=now)
                     written = wrote = True
                 finally:
                     debrief.finish_window(client, repo, period, end, machine, written=written)

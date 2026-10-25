@@ -55,7 +55,7 @@ REPEAT_COUNT = 3
 NUDGE_INTERVAL_S = 3600
 # `--every` cannot be shorter than this.
 MIN_EVERY_S = 600
-# Herdr states where the agent waits for the owner. The supervisor never answers for the owner.
+# Panes the supervisor cannot prompt.
 WAITING_STATES = {"blocked", "needs_attention"}
 _LIVE = {"running", "starting", "needs_attention"}
 STATE_FILE = Path(
@@ -254,7 +254,7 @@ def run_pass(
             "unit": loop.get("unit", "unknown"), "verdict": result, "nudge": nudge,
         }
         if result == "stopped" and state in WAITING_STATES:
-            row["reason"] = "waiting for the owner"
+            row["reason"] = "blocked, research needed"
         rows.append(row)
 
     if not dry_run:
