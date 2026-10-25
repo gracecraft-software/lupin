@@ -1473,6 +1473,64 @@ class RoadmapTests(unittest.TestCase):
         self.assertIn("Showing <b>0</b> of 0 issues", empty)
 
 
+    def test_repository_identity_errors_render_as_unknown_issue_count(self):
+        render = lambda title, body, css, js: body
+        identity_errors = [
+            (None, "GitHub returned invalid repository data"),
+            ({"name": "alpha"}, "GitHub returned no repository owner or name"),
+        ]
+
+        for identity, warning in identity_errors:
+            with self.subTest(warning=warning):
+                with mock.patch.object(
+                    roadmap, "_run_json", return_value=(identity, None)
+                ):
+                    issues, _comments, warnings = roadmap.load_github(
+                        "/missing/identity-repo"
+                    )
+
+                model = roadmap.build_model(
+                    issues, {}, [], warnings=warnings, repo="alpha"
+                )
+                page = roadmap.render_combined_page(
+                    ["alpha"], {"alpha": model}, render
+                )
+
+                self.assertTrue(model["issueFetchFailed"])
+                self.assertIn("unknown open issues", page)
+                self.assertIn(
+                    f"<details class='repo-warnings'><summary>alpha: {warning}</summary>",
+                    page,
+                )
+                self.assertNotIn("no open issues", page)
+
+
+    def test_failed_issue_fetch_is_unknown_and_warning_is_visible(self):
+        model = roadmap.build_model(
+            [],
+            {},
+            [],
+            warnings=["GitHub issue data is unavailable: auth failed"],
+            repo="alpha",
+        )
+        render = lambda title, body, css, js: body
+
+        page = roadmap.render_combined_page(["alpha"], {"alpha": model}, render)
+
+        self.assertIn("unknown open issues", page)
+        self.assertIn("GitHub issue data is unavailable: auth failed", page)
+        self.assertNotIn("no open issues", page)
+
+    def test_successful_empty_issue_fetch_still_reports_no_open_issues(self):
+        model = roadmap.build_model([], {}, [], repo="alpha")
+        render = lambda title, body, css, js: body
+
+        page = roadmap.render_combined_page(["alpha"], {"alpha": model}, render)
+
+        self.assertIn("0 open issues", page)
+        self.assertIn("no open issues", page)
+        self.assertNotIn("unknown open issues", page)
+
 class DependencyDagTests(unittest.TestCase):
     """build_dependency_dag combines blockedBy/blocking links -- GitHub's
     real issue-dependency feature, not a text search -- into one DAG that

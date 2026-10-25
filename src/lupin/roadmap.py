@@ -104,11 +104,12 @@ def _count_phrase(count: int, word: str) -> str:
     return f"{count} {word}" if count == 1 else f"{count} {word}s"
 
 
-def _empty_state(repos: list[str], has_issues: bool) -> str:
+def _empty_state(repos: list[str], has_issues: bool, has_fetch_failure: bool = False) -> str:
     """The message when the board or the list shows no rows.
 
     Repositories that are configured stay visible. The page never says
-    that no repositories exist while repositories are selected.
+    that no repositories exist while repositories are selected, and never
+    calls a failed GitHub read an empty repository.
     """
     if not repos:
         return "<p class='dim'>No repositories are configured for the roadmap.</p>"
@@ -118,6 +119,8 @@ def _empty_state(repos: list[str], has_issues: bool) -> str:
             "<p class='dim'>No issues match these filters. "
             f"The selected repositories still have open issues: {names}.</p>"
         )
+    if has_fetch_failure:
+        return f"<p class='dim'>The number of open issues is unknown for: {names}.</p>"
     return f"<p class='dim'>The selected repositories have no open issues: {names}.</p>"
 
 
@@ -807,6 +810,18 @@ def build_model(
         "handoffStatus": handoff_status,
         "acyclic": _acyclic(issue_ids, edge_list),
         "warnings": list(warnings or []),
+        "issueFetchFailed": any(
+            str(message).startswith(
+                (
+                    "GitHub issue data is unavailable",
+                    "GitHub returned invalid issue data",
+                    "GitHub returned invalid repository data",
+                    "GitHub returned no repository owner or name",
+                    "GitHub repository data is unavailable",
+                )
+            )
+            for message in (warnings or [])
+        ),
         "generatedAt": time.time(),
     }
 
@@ -1794,7 +1809,7 @@ def _repo_warnings(models: dict, repos: list[str]) -> str:
         parts.append(
             f"<details class='repo-warnings'>"
             f"<summary>{html.escape(repo)}: "
-            f"{len(messages)} warning{'s' if len(messages) != 1 else ''}</summary>"
+            f"{'; '.join(html.escape(message) for message in messages)}</summary>"
             f"<ul>{items}</ul></details>"
         )
     return "".join(parts)
@@ -2052,10 +2067,15 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
     else:
         issue_panel = "<aside class='roadmap-detail roadmap-detail-empty'><p>Select an issue to see its details.</p></aside>"
     quest_panel = _render_quest_section(repo_filter, quest_state) if repo_filter else ""
-    empty_html = _empty_state(active_repos, issue_count > 0)
+    has_fetch_failure = any(
+        (models.get(repo) or {}).get("issueFetchFailed", False)
+        for repo in active_repos
+    )
+    open_fact = "unknown" if has_fetch_failure else str(issue_count)
+    empty_html = _empty_state(active_repos, issue_count > 0, has_fetch_failure)
     body = (
         "<header class='roadmap-title'><h1>Roadmap</h1><span class='sp'></span>"
-        f"<span class='roadmap-facts'>{issue_count} open issues · {active_count} in progress</span></header>"
+        f"<span class='roadmap-facts'>{open_fact} open issues · {active_count} in progress</span></header>"
         f"<nav class='roadmap-repos' aria-label='Repositories'>{repo_html}</nav>"
         f"<div class='roadmap-board-toolbar'>{status_html}{view_html}</div>"
         f"{stage_tabs}"
@@ -2221,7 +2241,7 @@ def render_page(
         f"{queue_html}"
         f"<p class='dim'>GitHub data refreshes hourly; this page reloads about every five "
         f"minutes and reads ledger events from Redis.</p>"
-        f"<div class='queue-facts'><span class='pill'>{len(model['nodes'])} open issues</span>"
+        f"<div class='queue-facts'><span class='pill'>{'unknown' if model.get('issueFetchFailed') else len(model['nodes'])} open issues</span>"
         f"<span class='pill'>{model['activeCount']} {STAGE_IN_PROGRESS.lower()}</span>"
         f"<span class='pill'>{len(model['batch'])} {STAGE_READY.lower()}</span>{handoff_fact}</div>"
         f"{_render_quest_section(repo, quest_state)}"
@@ -2452,7 +2472,11 @@ def list_fragment(repos: list[str], models: dict, query: dict, quest_state=None)
     open_count = sum(
         len((models.get(repo) or {}).get("nodes", [])) for repo in selected_repos
     )
-    empty_html = _empty_state(selected_repos, open_count > 0)
+    has_fetch_failure = any(
+        (models.get(repo) or {}).get("issueFetchFailed", False)
+        for repo in selected_repos
+    )
+    empty_html = _empty_state(selected_repos, open_count > 0, has_fetch_failure)
 
     base_filters = {
         "view": "list",
