@@ -63,6 +63,13 @@ benchmark category covers both.
 - Check likely files before running issues in parallel. Treat Lupin's batch
   display as an estimate: it uses file paths written in issue text and does
   not confirm that a worker is running.
+- Look for trivial or small issues (for example, `size-xs` or `size-s`) that
+  touch the same likely files or one feature. Recommend one dispatch only when
+  one worker can meet each issue's acceptance checks in one branch. Keep
+  claimed, blocked, or already-in-PR issues separate.
+- Report each recommendation under `Bundles:` as `#N + #M — reason`. Use
+  `Bundles: none.` when no safe bundle fits. A bundle is one dispatch, not a
+  duplicate; the orchestrator decides whether to use it.
 - Treat priority, size, and status labels as repository data. Common names are
   `P0` to `P3`, `size-xs` to `size-xl`, `bug`, `needs-expert-decision`,
   `completely-blocked-on-human`, and `epic`. A repository may use other names.
