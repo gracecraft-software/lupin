@@ -86,9 +86,19 @@ One finding looks like this:
 
 ## Run the fix cycle
 
-Post each verdict as a review on the head SHA you read. Use the API command and
-the `COMMENT` rule in "Pull requests come first" in the `delegation-loop` skill.
-`Ship` is `APPROVE`. A blocking finding is `REQUEST_CHANGES`.
+Post each verdict as a GitHub review bound to the exact SHA you read. Use
+`APPROVE` for `Ship` and `REQUEST_CHANGES` for findings:
+
+```sh
+gh api repos/OWNER/REPO/pulls/<number>/reviews \
+  -f event=APPROVE -f commit_id=<full SHA> -F body=@verdict.md
+```
+
+Do not use `gh pr review`; it may bind the review to a newer head.
+
+Use `-f event=REQUEST_CHANGES` when the review asks for changes. If your login
+opened the PR, post `COMMENT` and ask the owner for a formal review in a `Loop:`
+PR comment.
 
 - N is 1 more than the N in the latest `Round` review on the PR (1 if none).
 - LEVEL is the next fix worker's LEVEL. Take it, and the stall rule, from "Fix
@@ -104,8 +114,9 @@ verdict, report to the orchestrator, and stop.
    `herdr agent start` in a new pane). Stop and report instead if the stall rule
    blocks the PR, if LEVEL is `size-l` and you are `size-m`, or if you cannot
    start an agent.
-2. Give it a brief with the PR, branch, remote, numbered findings, and failing
-   gate output. It pushes to the same branch.
+2. Give it a brief with the PR, branch, remote, findings, and gate output. Tell
+   it to follow `/ship` for the fix, gate, and screenshots. Use the PR-branch
+   worktree steps in the `delegation-loop` skill; it pushes to the same branch.
 3. Every 60 seconds, read the head SHA:
    `gh pr view <number> --repo OWNER/REPO --json headRefOid -q .headRefOid`.
    Stop waiting when it changes or the fix worker ends. If it ends with no push,

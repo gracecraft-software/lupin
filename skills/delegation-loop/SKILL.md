@@ -12,13 +12,15 @@ compatibility: >-
 
 # Run a Lupin delegation loop
 
-Read the root `AGENTS.md`, `docs/delegation-loop.md` (if any), and the latest
-issue comments. Follow the repo's branch, worktree, test, and release rules.
+Read the root `AGENTS.md`, `docs/delegation-loop.md` (if any), and latest issue
+comments. Manage the queue, claims, and dispatch. Delegate implementation to
+`/ship` and PR review to `/code-review`; workers follow the repo's rules.
 
-A loop pushes its branch to the `fork` remote, never to `origin` (`OWNER/REPO`)
-or `main`. It opens the PR on upstream against `main`, with `--head
-FORK_OWNER:<branch>`. Never create a new fork. Never open a PR or an issue on a
-fork.
+Every GitHub comment from the loop or its workers starts with `Loop:`.
+
+Workers follow `/ship` to push to the existing `fork` and open the PR on
+upstream `main`. Never push to `origin` or `main`, create a fork, or open a PR
+or issue on a fork.
 
 Give each worker its own worktree under `.claude/worktrees/`. Parallel workers
 must not edit the same checkout. A worker that opens a new branch makes its
@@ -76,89 +78,11 @@ It does not need to contain the current `main`. Skip a PR when the latest
 after it. For each other PR, do the first step that applies:
 
 1. The PR is ready for production. Take no action.
-2. `mergeable` is `CONFLICTING` (see "Review each pull request"): dispatch a
-   sync worker. It merges `origin/main` into the PR branch and resolves the
-   conflicts. If it cannot, it stops and reports them. Then dispatch a fix
-   worker to resolve them. Do not repeat that sync.
-3. The PR has findings or a failed repo gate (the checks that `AGENTS.md`
-   defines) at its current head SHA. A loop verdict with findings is at the head
-   and nothing runs: start a fix worker, as "Fix worker models" says. Otherwise
-   (the findings come from an owner comment or the gate): dispatch a reviewer
-   with the findings and the gate output. The reviewer runs the fix cycle and
-   starts the fix worker. See "Run the fix cycle" in the `code-review` skill.
-   - A fix worker cannot start, or `lupin route` fails or gives `wait_seconds`:
-     post the `Loop:` comment that step 3 of "Fix worker models" names, unless
-     the reviewer posted it. Do not call the PR blocked in this comment. Post it
-     once for each head SHA. Take the next item. Retry next cycle.
-   - The reviewer reports that the fix worker's LEVEL is above its own: do not
-     start a fix worker. Dispatch a reviewer from `lupin review-route --category
-CATEGORY --size size-l --mode separate`.
-4. The PR has no review at its current head SHA: dispatch a reviewer. Do not
-   wait for the worker to request one.
-5. The PR waits for a gate that is still running: wait for the result.
-
-Each reviewer brief says whether the loop owns the PR. A reviewer that posted a
-verdict in the last 30 minutes has a result for the 30-minute check on workers.
-A worker is a fix worker, a sync worker, or a reviewer. Do not dispatch a worker
-for a PR that already has one running. A reviewer in a fix cycle is running. Do
-not push to the branch of a PR that the loop does not own.
-
-A sync worker or a fix worker starts from the PR branch on the fork. Give it the
-branch name. It uses these commands, not the other worktree and push commands in
-this skill. The first three make its worktree. The last one pushes:
-
-```sh
-git fetch origin
-git fetch fork <branch>
-git worktree add --detach <path> fork/<branch>
-git push fork HEAD:<branch>
-```
-
-Read the reviews:
-
-```sh
-gh api --paginate repos/OWNER/REPO/pulls/<number>/reviews
-```
-
-Post a verdict as a review, through the API, with the SHA that you read. `gh pr
-review` binds the review to the head at the time of posting, and the head can
-move first:
-
-```sh
-gh api repos/OWNER/REPO/pulls/<number>/reviews \
-  -f event=APPROVE -f commit_id=<full SHA> -F body=@verdict.md
-```
-
-Use `-f event=REQUEST_CHANGES` when the review asks for changes. GitHub refuses
-an approval or a change request from the PR's author. If your login opened the
-PR, use a separate reviewer account. If you have none, post the verdict with `-f
-event=COMMENT`. If your verdict is `Ship`, ask the owner in a `Loop:` PR comment
-to approve the PR.
-
-Every comment that the loop or its workers post starts with `Loop:`. An owner
-comment has `author_association` `OWNER` or `MEMBER` and does not start with
-`Loop:`. A loop review starts with `Round` and is not an owner comment. In each
-cycle, read the new comments on each PR that the loop owns:
-
-```sh
-gh api --paginate repos/OWNER/REPO/issues/<number>/comments
-gh api --paginate repos/OWNER/REPO/pulls/<number>/comments
-```
-
-An owner comment that names a problem is a finding. A PR comment is never an
-approval. A review with findings is not an end state. The fix cycle repeats
-until the PR is ready for production. A round is one verdict. There is no round
-limit. Do not report, ask, or stop between rounds, except as "Run the fix cycle"
-says.
-
-A PR is blocked on an owner decision when it needs a sync or a fix and the loop
-does not own it, when its fix cycle is stalled (the stall rule in "Fix worker
-models"), or when a worker for it stops to ask the owner. On each blocked PR,
-post the `Loop:` comment that step 3 of "Fix worker models" names, unless the
-reviewer posted it. Then take the next item. In each cycle, read the new
-comments on each blocked PR. List the blocked PRs in the handoff. Dispatch syncs
-and reviews first. Then use the free worker slots for new issues. A PR in a fix
-cycle does not stop work on a new issue. Work that is already running continues.
+2. GitHub reports `CONFLICTING`: dispatch a sync worker.
+3. The current head has findings or a failed gate: dispatch `/code-review`
+   with the findings and gate output.
+4. The current head has no review: dispatch `/code-review`.
+5. A gate is running: wait for its result.
 
 ### Fix worker models
 
@@ -183,11 +107,11 @@ title,body,labels > FILE` for the linked issue, or `gh pr view` with the same
    result (Herdr: `herdr agent prompt NAME "report the result" --wait --timeout
 120000`, with the agent name or its pane ID). If it has none, stop it (Herdr:
    `herdr pane close <pane_id>`).
-5. If the fix worker ended with no push, whoever started it posts a `Round N.`
-   verdict review at the same head SHA, with the same findings and the line `The
-fix worker did not push.` Its first line is `Round N. LEVEL: <LEVEL>.`, as in
-   "Output format" in `code-review`. Check the stall rule (step 3) before you
-   post. That is the next round.
+5. If the fix worker ended with no push, the reviewer who started it posts a
+   `Round N.` verdict review at the same head SHA, with the same findings and
+   the line `The fix worker did not push.` The first line is
+   `Round N. LEVEL: <LEVEL>.`, as in "Output format" in `code-review`. Check the
+   stall rule (step 3) before posting. That is the next round.
 6. `size-l` usually gives Opus. That is allowed here. Never use Fable without
    the user's approval.
 
@@ -301,18 +225,14 @@ one issue or PR, run:
 lupin dispatch OWNER/REPO#N
 ```
 
-It claims the item, writes a markdown brief with the body and every comment
-(and, for a PR, every review and the changed files), and starts the loop with
-that brief. Add `--no-start` to write the brief only. Pass `--holder` or set
-`LUPIN_CLAIM_HOLDER` as for `lupin claim`. Give each worker a short brief with:
-issue goal and acceptance checks; latest comments and open dependencies; likely
-files and known parallel work; model, effort, and machine recommendation; claim
-or quest ID; machine, absolute worktree path, and branch; required tests and
-smoke checks. For a visual change, the brief must tell the worker to attach
-before and after screenshots to the PR, or the new screen if there is no before.
-See "Attach screenshots to the PR" in the `ship` skill. Tell implementation
-workers to follow `AGENTS.md`, rule 1 under "Pull requests, review, and
-handoff". Do not repeat the `/ship` implementation checklist.
+It claims the item, writes a brief with the issue or PR context, and starts the
+loop. Add `--no-start` to write the brief only. Pass `--holder` or set
+`LUPIN_CLAIM_HOLDER` as for `lupin claim`.
+
+For issue work, give the worker the goal, acceptance checks, latest comments,
+dependencies, likely files, model and effort, machine, claim, worktree, and
+branch. Tell the worker to follow `/ship`; do not repeat its checklist. For
+visual work, require screenshots on the PR as `/ship` says.
 
 When an issue makes a major change to a web app's user interface or key user
 journey, and a preview is ready, dispatch a separate QA task with
@@ -421,91 +341,63 @@ loop with the session name:
 herdr --session lupin-loops agent list
 ```
 
-## Review each pull request
+## Delegate PR review
 
-Dispatch `/code-review` for every pull request, including docs-only changes.
-Review the current PR diff, not only the issue or a worker's report. Re-fetch
-the latest PR comments and reviews before you post a verdict. The reviewer posts
-each verdict and its findings on the PR. A worker that opens a new branch pushes
-only that branch to the fork, with `git push -u fork <branch>`. The PR base is
-`main` on upstream:
+The orchestrator manages PR status and dispatch. The `/code-review` reviewer
+owns the code review and its fix cycle. Do not review the diff or implement
+findings yourself. Dispatch `/code-review` for every open, non-draft PR that
+the loop owns, including docs-only changes.
 
-<!-- markdownlint-disable MD013 -->
+Before dispatch, confirm ownership and hold the PR claim. Never modify or push
+to a PR the loop does not own. Read the latest issue and PR comments, reviews,
+current head SHA, mergeability, and gate status. Give the reviewer the issue
+acceptance checks, current findings, exact SHA, gate output, branch, claim, and
+required model and LEVEL. Do not start another worker for a PR while one is
+running. A reviewer in a fix cycle is still working.
 
-```sh
-gh pr create --repo OWNER/REPO --base main --head FORK_OWNER:<branch> --title "<title>" --body "Closes #N"
-```
+Use `lupin review-route --category CATEGORY --size SIZE --mode separate` to
+choose a reviewer. The reviewer must match or exceed the implementation worker's
+tier. For a fix cycle, use the fix worker's LEVEL or higher. If the required
+LEVEL exceeds the reviewer's, dispatch a reviewer at `size-l`. Review high-risk
+PRs alone; batch only small, independent PRs. Keep visual and 3D reviews to one
+or two PRs. Prefer one tier higher when quota allows, but use frontier models
+sparingly. A reviewer verdict in the last 30 minutes is a result for the worker
+check.
 
-<!-- markdownlint-enable MD013 -->
+For a visual PR, check for uploaded screenshots from `user-attachments` before
+dispatch. `/ship` owns screenshot capture and upload. An `evidence/` path is
+not an attachment.
+If upload fails, follow `/ship`'s recovery: copy the files before `lupin stop`,
+attach them with the repo-authorized token, and post the report before stopping
+the worktree. Ask the owner only if recovery fails; then take the next item.
 
-The PR body has one line for each issue. Use `Closes #N` when the PR finishes
-the issue, and `Refs #N` only when the PR leaves work open. If the fork push
-fails, the worker stops. It reports the branch name and commit range. Do not
-review the branch. After the PR opens, report its number to the orchestrator.
-
-For a visual change, you must check that the PR has screenshots before you
-dispatch the reviewer. A PR has screenshots when a comment on it shows images
-from `user-attachments`. A `./evidence/` path does not count. A worker whose
-token cannot upload reports the path of each file and its machine. Copy the
-images before you run `lupin stop`. Stop deletes the worktree and `evidence/`
-with it. To copy from another machine, run `mkdir -p ./evidence/<issue-number>`.
-Then run `scp <target>:<absolute path> ./evidence/<issue-number>/`. Take
-`<target>` from `~/.config/lupin/ssh-targets`. Open each image and check it, as
-in step 2 of "Attach screenshots to the PR" in the `ship` skill. Then attach the
-files yourself, with your own token, using the command in that section. Write
-your own `report.md` in the same folder. If the upload fails, post the report as
-a `Loop:` PR comment before `lupin stop`. Do not leave it only in the ignored
-`evidence/<issue-number>/report.md`. Do not dispatch the reviewer on a visual PR
-with no screenshots. If the worker says it could not capture a screenshot, the
-PR is blocked on an owner decision. Ask the owner how to go on in a `Loop:` PR
-comment. Then take the next item.
-
-Use `lupin review-route --category CATEGORY --size SIZE --mode separate` for a
-reviewer recommendation. Compare it with the issue's implementation route and
-the worker's model tier. One reviewer may review several small, independent PRs
-in one dispatch, with a separate verdict for each. Review complex or high-risk
-changes alone. Keep visual or 3D reviews to one or two PRs per dispatch. The
-reviewer must be capable of doing the issue and must not be below the worker's
-model tier. On a PR the loop owns, the reviewer uses `--size LEVEL` with the fix
-worker's LEVEL or higher. Prefer a reviewer one tier higher when quota allows, but
-use frontier models sparingly. If the fix changes anything a person can see, the brief must
-tell the fix worker to capture new screenshots, even when the finding is not
-labeled visual. The fix worker attaches them after it pushes (see "Attach
-screenshots to the PR" in the `ship` skill).
-
-Sync a PR only when GitHub reports a conflict with `main`. Check it:
+Sync only when GitHub reports `CONFLICTING`:
 
 ```sh
 gh pr view <number> --repo OWNER/REPO --json mergeable --jq .mergeable
 ```
 
-`CONFLICTING` means a sync is needed. `MERGEABLE` means it is not. `UNKNOWN`
-means read it again next cycle. The sync worker, or the fix worker that resolves
-a conflict, works in its worktree and follows these steps. Do not rebase:
+Sync and fix workers start from the PR branch on the fork. Give them the branch
+name and use a detached worktree:
 
-1. Run `git merge origin/main` and fix each conflict in the file.
-2. Run `git add FILE` for each file you changed.
-3. If you edit a file after `git add`, run `git add FILE` again before the
-   commit. A commit holds the text that was staged. The gate reads the working
-   tree, not the commit, so a missing stage looks like a pass.
-4. Run `git diff --stat`. It must print nothing. If it prints a file, run `git
-add FILE` for that file and run the check again.
-5. Run `git diff --stat HEAD`. It must list only the files you changed.
-6. Run `git commit`.
-7. Run `git diff --stat HEAD` again. It must print nothing. If it prints a file,
-   run `git add FILE`, commit again, and run the check again.
-8. Run `git push fork HEAD:<branch>`.
+```sh
+git fetch origin
+git fetch fork <branch>
+git worktree add --detach <path> fork/<branch>
+```
 
-The reviewer may limit the new review to the files the sync changed. The gate
-runs in every case. The reviewer is a different agent from the worker. The gate
-command is in the repo's `AGENTS.md`. If the repo has no gate command, report
-that. A branch with no open upstream PR is not merged. Do not force-push.
+After the gate passes, push to that branch:
 
-### Check that a PR is ready
+```sh
+git push fork HEAD:<branch>
+```
 
-The latest formal review is the newest review in state `APPROVED` or
-`CHANGES_REQUESTED`. This command prints its `commit_id` only when it is
-`APPROVED`. The PR is ready only when that value equals the head (`headRefOid`):
+Dispatch a sync worker to merge `origin/main` into the PR branch and resolve
+conflicts. Do not rebase or force-push. The worker runs the repo gate, commits
+the merge, and reports the new SHA. A sync needs a new review. For `MERGEABLE`,
+do not sync. For `UNKNOWN`, check again next cycle.
+
+Check that the latest formal approval matches the current `headRefOid`:
 
 ```sh
 gh api --paginate --slurp repos/OWNER/REPO/pulls/<PR-number>/reviews \
@@ -514,9 +406,30 @@ gh api --paginate --slurp repos/OWNER/REPO/pulls/<PR-number>/reviews \
     | if .state == "APPROVED" then .commit_id else null end'
 ```
 
-The output is `null` when the latest formal review is not an approval, or when
-no reviewer made one. `--paginate --slurp` reads every page. A `COMMENTED`
-review does not count.
+A `null` result means there is no formal approval. `COMMENTED` reviews do not
+count as formal approvals.
+
+Read all new issue and PR comments:
+
+```sh
+gh api --paginate repos/OWNER/REPO/issues/<number>/comments
+gh api --paginate repos/OWNER/REPO/pulls/<number>/comments
+```
+
+Treat comments with `author_association` `OWNER` or `MEMBER` and no `Loop:`
+prefix as owner comments. An owner comment that names a problem is a finding. A
+PR comment is not an approval.
+
+A review with findings is not final. The reviewer runs the fix cycle as
+`/code-review` says. Use "Fix worker models" for routing, stall, and no-push
+rules. If a worker cannot start, post the required `Loop:` comment once for
+that head SHA, then take the next item.
+
+A PR is blocked on an owner decision when it needs a sync or fix that the loop
+cannot make, the fix cycle is stalled, or a worker asks the owner. Post one
+`Loop:` comment with the reason and head SHA. Read new comments on blocked PRs
+each cycle. List blocked PRs in the handoff. Dispatch syncs and reviews first.
+A fix cycle does not stop work on another issue.
 
 ### Preview server
 
