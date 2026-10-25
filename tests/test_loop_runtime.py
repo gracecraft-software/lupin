@@ -2436,11 +2436,12 @@ def test_select_orchestrator_uses_the_account_with_quota_left():
     }
 
 
-def test_select_orchestrator_blocks_claude_when_weekly_usage_exceeds_90_percent():
+def test_select_orchestrator_blocks_claude_above_the_midweek_target(monkeypatch):
+    monkeypatch.delenv("LUPIN_WEEKLY_QUOTA_DAILY_TARGETS", raising=False)
     now = time.time()
     snapshot = {
         "claude": _quota_entry([
-            _quota_row("claude", 91, 6 * 24 * _HOUR_MS, QuotaDuration.WEEKLY, now),
+            _quota_row("claude", 13, 6 * 24 * _HOUR_MS, QuotaDuration.WEEKLY, now),
         ]),
         "openai": _quota_entry([
             _quota_row("openai", 91, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
@@ -2457,6 +2458,55 @@ def test_select_orchestrator_blocks_claude_when_weekly_usage_exceeds_90_percent(
         "model": "openai-codex/gpt-6-luna",
         "quota_headroom": 9,
     }
+
+
+def test_select_orchestrator_allows_claude_at_the_exact_midweek_target(monkeypatch):
+    monkeypatch.delenv("LUPIN_WEEKLY_QUOTA_DAILY_TARGETS", raising=False)
+    now = time.time()
+    snapshot = {
+        "claude": _quota_entry([
+            _quota_row("claude", 45, 3.5 * 24 * _HOUR_MS, QuotaDuration.WEEKLY, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 100, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+
+    choice = loop_runtime.select_orchestrator(
+        ["claude", "openai-codex/gpt-6-luna"], snapshot, now=now
+    )
+
+    assert choice["platform"] == "claude"
+    assert choice["quota_headroom"] == 55
+
+
+def test_select_orchestrator_allows_exact_90_percent_at_week_end(monkeypatch):
+    monkeypatch.delenv("LUPIN_WEEKLY_QUOTA_DAILY_TARGETS", raising=False)
+    now = time.time()
+    snapshot = {
+        "claude": _quota_entry([
+            _quota_row("claude", 90, 0, QuotaDuration.WEEKLY, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 100, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+
+    choice = loop_runtime.select_orchestrator(
+        ["claude", "openai-codex/gpt-6-luna"], snapshot, now=now
+    )
+
+    assert choice["platform"] == "claude"
+    assert choice["quota_headroom"] == 10
+
+
+def test_select_orchestrator_reports_invalid_weekly_target(monkeypatch):
+    monkeypatch.setenv("LUPIN_WEEKLY_QUOTA_DAILY_TARGETS", "[]")
+
+    with pytest.raises(
+        loop_runtime.EnvValueError, match="LUPIN_WEEKLY_QUOTA_DAILY_TARGETS"
+    ):
+        loop_runtime.select_orchestrator([], {}, now=time.time())
 
 
 def test_select_orchestrator_skips_a_provider_when_every_account_is_blocked():

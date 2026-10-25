@@ -1,6 +1,7 @@
 import copy
 import itertools
 import json
+import os
 import time
 import unittest
 from datetime import datetime, timezone
@@ -298,10 +299,13 @@ class ProviderForModelTests(unittest.TestCase):
 
 
 class RoutePacingTests(unittest.TestCase):
-    """Issue #36: quota is fleet-wide, so route() paces on it directly.
-    Grace's three literal rules (see pace.py), exercised through route()'s
-    own tier/bmo logic -- test_pace.py covers the rules themselves.
-    """
+    """Exercise fleet-wide quota pacing through route's tier and fallback logic."""
+
+    def setUp(self):
+        env = mock.patch.dict("os.environ")
+        env.start()
+        os.environ.pop(route.pace.WEEKLY_DAILY_TARGETS_SETTING, None)
+        self.addCleanup(env.stop)
 
     def _row(self, provider, used_pct, resets_in_ms, duration=QuotaDuration.FIVE_HOURS):
         # route() uses the real clock internally (it has no `now` override),
@@ -430,6 +434,46 @@ class RoutePacingTests(unittest.TestCase):
         self.assertEqual(result["model"], "sonnet")
         self.assertEqual(result["reason"], "all allowed models are blocked by quota")
         self.assertIsNone(result["wait_seconds"])
+
+    def test_weekly_claude_target_controls_route_at_midweek(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "sonnet", "effort": "high"}],
+                }
+            }
+        }
+        allowed = route.route(
+            "coding",
+            "size-m",
+            tiers=tiers,
+            quota_rows=[self._row("claude", 44, 3.5 * 24 * HOUR_MS, QuotaDuration.WEEKLY)],
+        )
+        blocked = route.route(
+            "coding",
+            "size-m",
+            tiers=tiers,
+            quota_rows=[self._row("claude", 46, 3.5 * 24 * HOUR_MS, QuotaDuration.WEEKLY)],
+        )
+
+        self.assertEqual(allowed["model"], "sonnet")
+        self.assertEqual(blocked["reason"], "all allowed models are blocked by quota")
+
+    def test_invalid_weekly_target_configuration_is_a_route_input_error(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "sonnet", "effort": "high"}],
+                }
+            }
+        }
+        row = self._row("claude", 1, 3 * 24 * HOUR_MS, QuotaDuration.WEEKLY)
+        with mock.patch.dict(
+            "os.environ",
+            {route.pace.WEEKLY_DAILY_TARGETS_SETTING: "[]"},
+        ):
+            with self.assertRaises(route.RouteInputError):
+                route.route("coding", "size-m", tiers=tiers, quota_rows=[row])
 
     def test_wait_reports_the_earliest_reset_among_everything_tried(self):
         rows = [

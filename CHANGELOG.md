@@ -42,9 +42,10 @@ All notable changes to Lupin. The version has one source:
   is missing or different.
 - "Run now" passes dash-leading notes as one argument, and rejects notes
   with a NUL byte before dispatch.
-- Routing and loop profiles block Claude's weekly quota above 90%. A blocked
-  route tries only same- or lower-tier models with verified prices no higher
-  than the blocked model, then defers with a reason.
+- Routing and loop profiles pace weekly quota from each reset, using
+  `LUPIN_WEEKLY_QUOTA_DAILY_TARGETS`. Claude defaults to 90% over seven days,
+  with one shared 90% ceiling. A blocked route tries only same- or lower-tier
+  models with verified prices no higher than the blocked model, then defers.
 - OMP prompt jobs do not wait for caller stdin to close.
 - Claim reads use Redis `TTL` for the remaining time.
 - `lupin place` reports quota deferrals when no reset time is available.

@@ -1,16 +1,26 @@
-"""Tests for `pace.py` (issue #36): fleet-wide quota pacing facts.
+"""Tests for fleet-wide quota pacing and weekly targets in `pace.py`."""
 
-Grace's three literal rules, not the abstract pacing-ratio design that
-preceded them in the issue thread -- see `pace.py`'s own docstring.
-"""
-
+import os
 import unittest
+from unittest.mock import patch
 
 from lupin import pace
 from lupin.quota import QuotaDuration
 
 HOUR_MS = 60 * 60 * 1000
 MIN_MS = 60 * 1000
+DAY_MS = 24 * HOUR_MS
+
+_TARGET_ENV = patch.dict("os.environ")
+
+
+def setUpModule():
+    _TARGET_ENV.start()
+    os.environ.pop(pace.WEEKLY_DAILY_TARGETS_SETTING, None)
+
+
+def tearDownModule():
+    _TARGET_ENV.stop()
 
 
 def _row(provider, used_pct, resets_in_ms, duration=QuotaDuration.FIVE_HOURS, now_ms=0):
@@ -23,8 +33,9 @@ def _row(provider, used_pct, resets_in_ms, duration=QuotaDuration.FIVE_HOURS, no
 
 
 class BlockedTests(unittest.TestCase):
-    """Claude's weekly window blocks above 90% with no grace. Other windows
-    use a 95% reserve unless under 3h remain; 100% is always blocked."""
+    """Weekly targets grow with elapsed time; short windows use a 95% reserve.
+    Other windows keep their three-hour grace; missing weekly resets block.
+    """
 
     def test_under_95_percent_is_never_blocked(self):
         rows = [_row("claude", 94, 10 * HOUR_MS)]
@@ -68,17 +79,78 @@ class BlockedTests(unittest.TestCase):
         rows = [_row("openai", 100, MIN_MS)]
         self.assertFalse(pace.blocked(rows, "claude", 0))
 
-    def test_claude_weekly_usage_above_90_percent_is_blocked(self):
-        rows = [_row("claude", 91, 10 * HOUR_MS, QuotaDuration.WEEKLY)]
+    def test_claude_weekly_usage_above_90_percent_is_blocked_at_week_end(self):
+        rows = [_row("claude", 91, 0, QuotaDuration.WEEKLY)]
         self.assertTrue(pace.blocked(rows, "claude", 0))
 
-    def test_claude_weekly_usage_at_90_percent_is_not_blocked(self):
-        rows = [_row("claude", 90, 10 * HOUR_MS, QuotaDuration.WEEKLY)]
+    def test_claude_weekly_usage_at_90_percent_is_allowed_at_week_end(self):
+        rows = [_row("claude", 90, 0, QuotaDuration.WEEKLY)]
         self.assertFalse(pace.blocked(rows, "claude", 0))
 
-    def test_claude_weekly_usage_above_90_percent_has_no_reset_grace(self):
-        rows = [_row("claude", 91, 2 * HOUR_MS, QuotaDuration.WEEKLY)]
+    def test_claude_weekly_usage_at_90_percent_is_blocked_before_week_end(self):
+        rows = [_row("claude", 90, 2 * HOUR_MS, QuotaDuration.WEEKLY)]
         self.assertTrue(pace.blocked(rows, "claude", 0))
+
+    def test_weekly_target_tracks_elapsed_time_and_allows_exact_boundary(self):
+        cases = [
+            ("start", 7 * DAY_MS, 0),
+            ("middle", 3.5 * DAY_MS, 45),
+            ("end", 0, 90),
+        ]
+        for label, resets_in_ms, target in cases:
+            with self.subTest(label=label):
+                self.assertFalse(pace.blocked(
+                    [_row("claude", target, resets_in_ms, QuotaDuration.WEEKLY)],
+                    "claude",
+                    0,
+                ))
+                if target:
+                    self.assertFalse(pace.blocked(
+                        [_row("claude", target - 0.1, resets_in_ms, QuotaDuration.WEEKLY)],
+                        "claude",
+                        0,
+                    ))
+                self.assertTrue(pace.blocked(
+                    [_row("claude", target + 0.1, resets_in_ms, QuotaDuration.WEEKLY)],
+                    "claude",
+                    0,
+                ))
+
+    def test_provider_daily_target_overrides_default_rate(self):
+        setting = pace.WEEKLY_DAILY_TARGETS_SETTING
+        with patch.dict("os.environ", {setting: '{"claude": 12, "openai": 20}'}):
+            self.assertFalse(pace.blocked(
+                [_row("openai", 70, 3.5 * DAY_MS, QuotaDuration.WEEKLY)],
+                "openai",
+                0,
+            ))
+            self.assertTrue(pace.blocked(
+                [_row("openai", 71, 3.5 * DAY_MS, QuotaDuration.WEEKLY)],
+                "openai",
+                0,
+            ))
+            self.assertTrue(pace.blocked(
+                [_row("claude", 43, 3.5 * DAY_MS, QuotaDuration.WEEKLY)],
+                "claude",
+                0,
+            ))
+
+    def test_weekly_row_without_reset_fails_closed(self):
+        rows = [{
+            "provider": "claude",
+            "duration": QuotaDuration.WEEKLY,
+            "used_pct": 0,
+            "resets_at": None,
+        }]
+        self.assertTrue(pace.blocked(rows, "claude", 0))
+        self.assertIsNone(pace.headroom(rows, "claude", 0))
+
+    def test_invalid_daily_target_configuration_is_rejected(self):
+        setting = pace.WEEKLY_DAILY_TARGETS_SETTING
+        for value in ("[]", '{"claude": 101}', '{"claude": true}', "not-json"):
+            with self.subTest(value=value), patch.dict("os.environ", {setting: value}):
+                with self.assertRaises(pace.PacingConfigError):
+                    pace.weekly_daily_targets()
 
 
 class LeanInTests(unittest.TestCase):

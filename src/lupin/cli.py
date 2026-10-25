@@ -35,6 +35,7 @@ from . import pr_status
 from . import quest as quest_mod
 from . import quota
 from . import quota_cache
+from . import pace as pace_mod
 from . import usage_cache
 from . import reconcile as reconcile_mod
 from . import review_dispatch
@@ -2287,7 +2288,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run `_main`; report Redis and tier-routing errors without tracebacks."""
+    """Run `_main`; report command and quota-setting errors without tracebacks."""
     try:
         return _main(argv)
     except _REDIS_REFUSED as exc:
@@ -2297,6 +2298,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"lupin: {exc}", file=sys.stderr)
         return 2
     except route_mod.RouteInputError as exc:
+        print(f"lupin: {exc}", file=sys.stderr)
+        return 2
+    except pace_mod.PacingConfigError as exc:
         print(f"lupin: {exc}", file=sys.stderr)
         return 2
 
@@ -2313,6 +2317,7 @@ def _main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(lupin_argv)
 
     if args.cmd == "serve":
+        pace_mod.weekly_daily_targets()
         return serve.main(lupin_argv[1:])
 
     if args.cmd == "review-route":

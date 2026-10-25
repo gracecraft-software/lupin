@@ -153,7 +153,10 @@ lupin enable my-repo --platform omp \
 Profiles are local to each worker. Set them on each worker that can start the
 repo. At loop start, Lupin uses quota data from the shared cache. The data
 must be less than five minutes old and include usable quota for a candidate.
-Claude's weekly quota is blocked above 90%. This limit has no reset grace.
+Weekly targets use `LUPIN_WEEKLY_QUOTA_DAILY_TARGETS` and grow from each
+reset at the configured rate. Claude defaults to 90% over seven days, leaving
+10% unused. Routes and profiles share the 90% ceiling. Exact target usage is
+allowed; usage above it is blocked. A weekly row with no reset is blocked.
 Lupin skips blocked providers, then picks the candidate with the most quota
 headroom across its known windows. For a provider with more than one login,
 headroom is that of the best login that is not blocked. Profile order breaks

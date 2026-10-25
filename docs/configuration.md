@@ -487,6 +487,21 @@ key wins over the directory.
   `src/lupin/serve.py` (`_model_tiers_path`).
 - **Set by**: the user.
 
+### `LUPIN_WEEKLY_QUOTA_DAILY_TARGETS`
+
+- **Purpose**: set daily usage targets for weekly quota windows.
+- **Default**: Claude gets `90/7` percentage points per elapsed day. Other
+  providers use the existing 95% reserve.
+- **Effect**: use a JSON object to map quota provider names to daily
+  percentage points. Values must be finite numbers from 0 to 100. Entries
+  override defaults. Lupin multiplies each rate by elapsed days since the
+  weekly reset. It caps Claude at 90% and other providers at 95%. Usage at
+  the exact target is allowed. Lupin blocks a configured weekly row with no
+  reset time. For example, `{"claude": 15, "openai": 12}` sets both rates.
+- **Read by**: `src/lupin/pace.py`, used by route, profile selection, and
+  quota account choice.
+- **Set by**: the user or host config. Loop units get this variable when set.
+
 ### `OPENCODE_API_KEY`
 
 This variable does not start with `LUPIN_`. The test does not check it.
@@ -518,6 +533,7 @@ each loop unit when they are set (`loop_runtime._service_environment`):
 `LUPIN_HERDR_BIN`, `LUPIN_GH_CANONICAL_FETCHER`, `LUPIN_LOOP_STATE_DIR`,
 `LUPIN_LOOP_CODE_DIR`, `LUPIN_LOOP_USER`, `LUPIN_LOOP_GROUP`,
 `LUPIN_LOOP_DEFAULT_REPOS`, `LUPIN_LOOP_CLAUDE_MAX_CONCURRENT`,
+`LUPIN_WEEKLY_QUOTA_DAILY_TARGETS`,
 `LUPIN_LOOP_CREDENTIALS_FILE`, `LUPIN_LOOP_REDIS_PASSWORD_FILE`,
 `LUPIN_LOOP_PROMPT_FILE`, `LUPIN_LOOP_PATH`, `ANTHROPIC_BASE_URL`,
 `HEADROOM_TELEMETRY_DISABLED`, `RTK_TELEMETRY_DISABLED`,

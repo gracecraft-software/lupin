@@ -631,6 +631,7 @@ def snapshot() -> dict[str, dict]:
 
     rows = quota_usage()
     now_ms = time.time() * 1000
+    weekly_targets = pace.weekly_daily_targets()
     per_account: dict[tuple[str, str | None], dict] = {}
     account_rows: dict[tuple[str, str | None], list[dict]] = {}
     for row in rows:
@@ -644,14 +645,14 @@ def snapshot() -> dict[str, dict]:
 
     blocked_accounts = {
         key for key in per_account
-        if pace.blocked(account_rows[key], key[0], now_ms)
+        if pace.blocked(
+            account_rows[key], key[0], now_ms, weekly_targets=weekly_targets
+        )
     }
 
     def _left(key: tuple[str, str | None]) -> float:
-        # The most-used window decides. That is the number `pace.headroom` uses,
-        # so the rows are the same `pace._usable_rows` test: a real `used_pct`
-        # and a real `resets_at`. A row with an unknown reset is unknown, not
-        # almost-used.
+        # Rank rows with known resets. A configured weekly row without a reset
+        # blocks the account, but cannot give quota headroom.
         values = [
             max(0.0, 100 - row["used_pct"]) for row in account_rows[key]
             if isinstance(row.get("used_pct"), (int, float))

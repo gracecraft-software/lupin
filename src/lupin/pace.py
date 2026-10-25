@@ -11,24 +11,23 @@ label. `omp` picks the account for each session. So a provider is blocked
 only when every account is blocked. A blocked account never counts for
 lean-in or headroom.
 
-Pure. No stored state, no Redis, no file access -- every number comes from
-the rows a caller passes in. `route.py` is the only caller; it decides what
-to do with these facts (which tier, which fallback). This module just
-reports them.
+This module has no stored state or Redis access. It reads provider targets from
+`LUPIN_WEEKLY_QUOTA_DAILY_TARGETS`; all other facts come from quota rows and a
+timestamp. `route.py` and `loop_runtime.py` use the same rules for model and
+profile choices.
 
-The literal rules come from issue #36 (comment of 2026-10-07 20:31 UTC).
-The surplus test on the 30-minute lean-in comes from issue #99.
-The abstract pacing-ratio design from issue #36's earlier comment is not
-implemented here.
+The short-window rules come from issue #36. The 30-minute surplus rule comes
+from issue #99. Weekly windows with a configured daily target use a linear
+target across the window.
 
-Boundary convention, used consistently below: every "less than" check is
-strict (`<`), every "at or above" check is `>=`. An exact boundary value
-(used_pct == 95, remaining == 3h, remaining == 30m, remaining == 24h, used_pct
-== 50) always falls on the *conservative* side -- still reserved, still
-blocked, no lean-in -- never on the side that spends more quota.
+At an exact weekly target, Lupin allows use. A value above it is blocked.
+Other reserve and lean-in boundaries stay conservative: `>=` is blocked and
+`<` is required to lean in.
 """
 
-from __future__ import annotations
+import json
+import math
+import os
 
 from .quota import QuotaDuration
 
@@ -39,13 +38,57 @@ LEAN_IN_SOON_MS = 30 * 60 * 1000  # 30 minutes
 LEAN_IN_LOW_USE_PCT = 50
 LEAN_IN_LOW_USE_WINDOW_MS = 24 * 60 * 60 * 1000  # 24 hours
 
+WEEKLY_DAILY_TARGETS_SETTING = "LUPIN_WEEKLY_QUOTA_DAILY_TARGETS"
+DEFAULT_WEEKLY_DAILY_TARGETS = {"claude": CLAUDE_WEEKLY_BLOCK_PCT / 7}
+DAY_MS = 24 * 60 * 60 * 1000
 
-def _usable_rows(rows: list[dict], provider: str) -> list[dict]:
-    """Rows with a real `used_pct` and enough reset data for their rules.
 
-    Claude's weekly percentage guard does not need a reset timestamp. Other
-    windows do, because their reserve and grace calculations use it.
-    """
+class PacingConfigError(ValueError):
+    """A weekly quota target setting is invalid."""
+
+
+def weekly_daily_targets() -> dict[str, float]:
+    """Return the default targets with any provider overrides."""
+    raw = os.environ.get(WEEKLY_DAILY_TARGETS_SETTING)
+    if raw is None:
+        return dict(DEFAULT_WEEKLY_DAILY_TARGETS)
+    try:
+        configured = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise PacingConfigError(
+            f"{WEEKLY_DAILY_TARGETS_SETTING} must be a JSON object: {exc.msg}"
+        ) from None
+    if not isinstance(configured, dict):
+        raise PacingConfigError(
+            f"{WEEKLY_DAILY_TARGETS_SETTING} must be a JSON object of provider names and daily percentages"
+        )
+    targets = dict(DEFAULT_WEEKLY_DAILY_TARGETS)
+    for provider, daily_pct in configured.items():
+        if not isinstance(provider, str) or not provider or provider.strip() != provider:
+            raise PacingConfigError(
+                f"{WEEKLY_DAILY_TARGETS_SETTING} has an invalid provider name"
+            )
+        if (
+            isinstance(daily_pct, bool)
+            or not isinstance(daily_pct, (int, float))
+            or not 0 <= daily_pct <= 100
+            or not math.isfinite(daily_pct)
+        ):
+            raise PacingConfigError(
+                f"{WEEKLY_DAILY_TARGETS_SETTING} value for {provider!r} must be a number from 0 to 100"
+            )
+        targets[provider] = float(daily_pct)
+    return targets
+
+
+def _weekly_targets(value: dict[str, float] | None) -> dict[str, float]:
+    return weekly_daily_targets() if value is None else value
+
+
+def _usable_rows(
+    rows: list[dict], provider: str, weekly_targets: dict[str, float]
+) -> list[dict]:
+    """Rows with a usable percentage and reset, or a configured weekly target."""
     return [
         row for row in rows
         if row.get("provider") == provider
@@ -53,26 +96,29 @@ def _usable_rows(rows: list[dict], provider: str) -> list[dict]:
         and (
             isinstance(row.get("resets_at"), (int, float))
             or (
-                provider == "claude"
-                and row.get("duration") == QuotaDuration.WEEKLY
+                row.get("duration") == QuotaDuration.WEEKLY
+                and provider in weekly_targets
             )
         )
     ]
 
 
-def _window_blocked(row: dict, now_ms: float) -> bool:
-    """True when one quota window is reserved or exhausted.
-
-    Claude's weekly window is blocked above 90%, with no reset grace.
-    Other windows use the 95% reserve unless under 3 hours remain; 100%
-    usage is always blocked.
-    """
+def _window_blocked(
+    row: dict, now_ms: float, weekly_targets: dict[str, float]
+) -> bool:
+    """True when one quota window is over its target or reserve."""
     used_pct = row["used_pct"]
-    if (
-        row.get("provider") == "claude"
-        and row.get("duration") == QuotaDuration.WEEKLY
-    ):
-        return used_pct > CLAUDE_WEEKLY_BLOCK_PCT
+    provider = row.get("provider")
+    duration = row.get("duration")
+    if duration == QuotaDuration.WEEKLY and provider in weekly_targets:
+        resets_at = row.get("resets_at")
+        if not isinstance(resets_at, (int, float)):
+            return True
+        duration_ms = duration.milliseconds
+        elapsed_ms = max(0, min(duration_ms, duration_ms - (resets_at - now_ms)))
+        ceiling = CLAUDE_WEEKLY_BLOCK_PCT if provider == "claude" else RESERVE_PCT
+        target_pct = min(ceiling, weekly_targets[provider] * elapsed_ms / DAY_MS)
+        return used_pct > target_pct
     if used_pct >= 100:
         return True
     if used_pct >= RESERVE_PCT:
@@ -80,42 +126,52 @@ def _window_blocked(row: dict, now_ms: float) -> bool:
     return False
 
 
-def _accounts(rows: list[dict], provider: str) -> list[list[dict]]:
-    """`provider`'s usable rows, one list for each account.
-
-    Rows with no `account` label are one account.
-    """
+def _accounts(
+    rows: list[dict], provider: str, weekly_targets: dict[str, float]
+) -> list[list[dict]]:
+    """`provider`'s usable rows, one list for each account."""
     accounts: dict[str | None, list[dict]] = {}
-    for row in _usable_rows(rows, provider):
+    for row in _usable_rows(rows, provider, weekly_targets):
         accounts.setdefault(row.get("account"), []).append(row)
     return list(accounts.values())
 
 
-def _account_blocked(account_rows: list[dict], now_ms: float) -> bool:
+def _account_blocked(
+    account_rows: list[dict], now_ms: float, weekly_targets: dict[str, float]
+) -> bool:
     return any(
-        _window_blocked(row, now_ms)
+        _window_blocked(row, now_ms, weekly_targets)
         for row in account_rows
     )
 
 
-def blocked(rows: list[dict], provider: str, now_ms: float) -> bool:
-    """True if every account of `provider` has a blocked window.
+def blocked(
+    rows: list[dict],
+    provider: str,
+    now_ms: float,
+    *,
+    weekly_targets: dict[str, float] | None = None,
+) -> bool:
+    """True if every usable account of `provider` has a blocked window."""
+    targets = _weekly_targets(weekly_targets)
+    accounts = _accounts(rows, provider, targets)
+    return bool(accounts) and all(
+        _account_blocked(account_rows, now_ms, targets) for account_rows in accounts
+    )
 
-    An account with no usable rows is unknown, not blocked, and not counted.
-    """
-    accounts = _accounts(rows, provider)
-    return bool(accounts) and all(_account_blocked(account_rows, now_ms) for account_rows in accounts)
 
-
-def headroom(rows: list[dict], provider: str, now_ms: float) -> float | None:
-    """The most quota left (in percent) on one account that is not blocked.
-
-    For one account this is its most-used window. `None` when no account
-    has data, or every account is blocked.
-    """
+def headroom(
+    rows: list[dict],
+    provider: str,
+    now_ms: float,
+    *,
+    weekly_targets: dict[str, float] | None = None,
+) -> float | None:
+    """The most quota left on one account that is not blocked."""
+    targets = _weekly_targets(weekly_targets)
     open_accounts = [
-        account_rows for account_rows in _accounts(rows, provider)
-        if not _account_blocked(account_rows, now_ms)
+        account_rows for account_rows in _accounts(rows, provider, targets)
+        if not _account_blocked(account_rows, now_ms, targets)
     ]
     if not open_accounts:
         return None
@@ -159,41 +215,38 @@ def _account_leans_in(account_rows: list[dict], now_ms: float) -> bool:
     return window["used_pct"] < LEAN_IN_LOW_USE_PCT and remaining < LEAN_IN_LOW_USE_WINDOW_MS
 
 
-def lean_in(rows: list[dict], provider: str, now_ms: float) -> bool:
-    """True if `provider` has earned a one-tier-up lean-in (decision 2).
-
-    Looks only at the longest window with real data of each account. A
-    blocked account is skipped. Blocked always wins: a provider with no
-    open account never leans in. `omp` can pick any open account, so every
-    open account must qualify.
-
-    A surplus means used_pct is below the elapsed percent of the longest
-    window. The 30-minute clause needs a surplus. The 24-hour clause
-    needs used_pct under 50 and does not check for a surplus.
-    """
+def lean_in(
+    rows: list[dict],
+    provider: str,
+    now_ms: float,
+    *,
+    weekly_targets: dict[str, float] | None = None,
+) -> bool:
+    """True if every open account of `provider` has earned a one-tier-up lean-in."""
+    targets = _weekly_targets(weekly_targets)
     open_accounts = [
-        account_rows for account_rows in _accounts(rows, provider)
-        if not _account_blocked(account_rows, now_ms)
+        account_rows for account_rows in _accounts(rows, provider, targets)
+        if not _account_blocked(account_rows, now_ms, targets)
     ]
     return bool(open_accounts) and all(
         _account_leans_in(account_rows, now_ms) for account_rows in open_accounts
     )
 
 
-def earliest_reset(rows: list[dict], providers: list[str], now_ms: float) -> float | None:
-    """Earliest `resets_at` among `providers`' blocked windows.
-
-    `route()` calls this once every candidate it tried is blocked, to
-    report how long the caller must wait. Ignores a provider with no
-    blocked window (nothing to wait on there) and a blocked window with no
-    usable `resets_at` (unknown, not zero) -- `None` means not one of
-    `providers` has a usable wait estimate at all.
-    """
+def earliest_reset(
+    rows: list[dict],
+    providers: list[str],
+    now_ms: float,
+    *,
+    weekly_targets: dict[str, float] | None = None,
+) -> float | None:
+    """Earliest reset among blocked windows for the providers."""
+    targets = _weekly_targets(weekly_targets)
     waits = [
         row["resets_at"]
         for provider in providers
-        for row in _usable_rows(rows, provider)
+        for row in _usable_rows(rows, provider, targets)
         if isinstance(row.get("resets_at"), (int, float))
-        and _window_blocked(row, now_ms)
+        and _window_blocked(row, now_ms, targets)
     ]
     return min(waits) if waits else None

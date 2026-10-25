@@ -130,6 +130,10 @@ def select_orchestrator(
 
     now = time.time() if now is None else now
     now_ms = now * 1000
+    try:
+        weekly_targets = pace.weekly_daily_targets()
+    except pace.PacingConfigError as exc:
+        raise EnvValueError(str(exc)) from exc
     choices: list[tuple[float, int, dict[str, str | float | None]]] = []
     for index, raw in enumerate(candidates):
         selector = validate_orchestrator(raw)
@@ -149,7 +153,9 @@ def select_orchestrator(
         if not isinstance(rows, list):
             continue
         rows = [row for row in rows if isinstance(row, dict)]
-        headroom = pace.headroom(rows, provider, now_ms)
+        headroom = pace.headroom(
+            rows, provider, now_ms, weekly_targets=weekly_targets
+        )
         if headroom is None:
             continue
         choices.append((headroom, -index, {
@@ -610,6 +616,7 @@ def _service_environment() -> list[str]:
         "LUPIN_GH_CANONICAL_FETCHER",
         "LUPIN_LOOP_STATE_DIR", "LUPIN_LOOP_CODE_DIR", "LUPIN_LOOP_USER", "LUPIN_LOOP_GROUP",
         "LUPIN_LOOP_DEFAULT_REPOS", "LUPIN_LOOP_CLAUDE_MAX_CONCURRENT",
+        "LUPIN_WEEKLY_QUOTA_DAILY_TARGETS",
         "LUPIN_LOOP_CREDENTIALS_FILE", "LUPIN_LOOP_REDIS_PASSWORD_FILE",
         "LUPIN_LOOP_PROMPT_FILE", "LUPIN_LOOP_PATH", "ANTHROPIC_BASE_URL",
         "LUPIN_SYSTEMD_RUN",
