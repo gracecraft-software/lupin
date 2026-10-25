@@ -361,6 +361,37 @@ def test_loops_unreadable_repos_file_exits_one_without_traceback(monkeypatch, tm
     assert "Traceback" not in err
 
 
+def test_loops_json_shows_checkout_agent_as_unmanaged(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "missing")
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"lupin": "claude"})
+    monkeypatch.setattr(
+        loop_runtime,
+        "_agents",
+        lambda session: [
+            {
+                "cwd": "/home/user/code/lupin",
+                "workspace_id": "w3V",
+                "pane_id": "w3V:p1",
+                "agent_status": "working",
+                "agent": "claude",
+            }
+        ],
+    )
+
+    assert cli.main(["loops", "--json"]) == 0
+
+    rows = json.loads(capsys.readouterr().out)
+    loop = next(row for row in rows if row.get("repo") == "lupin")
+    unmanaged = next(row for row in rows if row.get("managed") is False)
+    assert loop["state"] == "stopped"
+    assert unmanaged["repo"] is None
+    assert unmanaged["pane_id"] == "w3V:p1"
+    assert unmanaged["workspace_id"] == "w3V"
+    assert unmanaged["agent"] == "claude"
+
+    assert cli.main(["loops"]) == 0
+    assert "unmanaged: working (herdr)" in capsys.readouterr().out
+
 
 @pytest.mark.parametrize(
     "argv, action, params",

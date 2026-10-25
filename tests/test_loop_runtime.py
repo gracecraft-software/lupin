@@ -130,7 +130,7 @@ def test_local_loops_marks_a_missing_running_workspace_for_attention(monkeypatch
     assert json.loads(path.read_text(encoding="utf-8"))["state"] == "needs_attention"
 
 
-def test_local_loops_groups_herdr_agents_without_metadata(monkeypatch, tmp_path: Path):
+def test_local_loops_does_not_map_agents_by_checkout_path(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "missing")
     monkeypatch.setattr(loop_runtime, "CODE_DIR", Path("/code"))
     monkeypatch.setattr(
@@ -138,37 +138,16 @@ def test_local_loops_groups_herdr_agents_without_metadata(monkeypatch, tmp_path:
         "_agents",
         lambda session: [
             {
-                "cwd": "/code/bodysmith",
-                "workspace_id": "workspace-1",
-                "pane_id": "w1:p1",
-                "agent_status": "working",
-                "agent": "omp",
-            },
-            {
-                "cwd": "/code/bodysmith",
-                "workspace_id": "workspace-2",
-                "pane_id": "w2:p1",
-                "agent_status": "blocked",
-                "agent": "claude",
-            },
-            {
                 "cwd": "/code/lupin",
-                "workspace_id": "workspace-3",
-                "pane_id": "w3:p1",
-                "agent_status": "idle",
-                "agent": "omp",
+                "workspace_id": "w3V",
+                "pane_id": "w3V:p1",
+                "agent_status": "working",
+                "agent": "claude",
             },
         ],
     )
 
-    loops = loop_runtime.local_loops()
-
-    assert [row["repo"] for row in loops] == ["bodysmith", "lupin"]
-    assert loops[0]["state"] == "needs_attention"
-    assert loops[0]["platform"] == "omp"
-    assert [pane["pane_id"] for pane in loops[0]["panes"]] == ["w1:p1", "w2:p1"]
-    assert loops[0]["panes"][0]["agent"] == "omp"
-    assert loops[1]["state"] == "running"
+    assert loop_runtime.local_loops() == []
 
 
 
@@ -185,7 +164,17 @@ def test_agent_repo_uses_origin_for_worktree_paths(tmp_path: Path):
     assert loop_runtime._agent_repo({"cwd": str(checkout)}) == "widgets"
 
 
-def test_local_loops_adds_external_panes_to_saved_loop(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize(
+    ("statuses", "initial_state"),
+    [
+        (("idle", "blocked"), "working"),
+        (("blocked", "idle"), "working"),
+        (("idle", "working"), "blocked"),
+    ],
+)
+def test_local_loops_matches_agents_by_saved_workspace_or_pane_id(
+    monkeypatch, tmp_path: Path, statuses: tuple[str, str], initial_state: str
+):
     loops_dir = tmp_path / "herdr-loops"
     loops_dir.mkdir()
     (loops_dir / "widgets.json").write_text(
@@ -198,23 +187,42 @@ def test_local_loops_adds_external_panes_to_saved_loop(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(
         loop_runtime,
         "loop_state",
-        lambda repo: {"repo": repo, "state": "working", "workspace_id": "saved", "pane_id": "saved:p1"},
+        lambda repo: {
+            "repo": repo,
+            "state": initial_state,
+            "workspace_id": "saved",
+            "pane_id": "saved:p1",
+        },
     )
     monkeypatch.setattr(loop_runtime, "_agents", lambda session: [
+        {
+            "cwd": "/tmp/not-the-repo",
+            "workspace_id": "saved",
+            "pane_id": "w3:p1",
+            "agent_status": statuses[0],
+            "agent": "omp",
+        },
+        {
+            "cwd": "/tmp/not-the-repo",
+            "workspace_id": "other",
+            "pane_id": "saved:p1",
+            "agent_status": statuses[1],
+            "agent": "claude",
+        },
         {
             "cwd": "/code/widgets",
             "workspace_id": "external",
             "pane_id": "external:p1",
-            "agent_status": "idle",
+            "agent_status": "working",
             "agent": "omp",
-        }
+        },
     ])
 
     loops = loop_runtime.local_loops()
 
     assert len(loops) == 1
-    assert loops[0]["state"] == "running"
-    assert loops[0]["panes"][0]["pane_id"] == "external:p1"
+    assert loops[0]["state"] == "needs_attention"
+    assert [pane["pane_id"] for pane in loops[0]["panes"]] == ["w3:p1", "saved:p1"]
 
 
 def test_peek_finds_an_external_herdr_agent(monkeypatch):

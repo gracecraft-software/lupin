@@ -254,10 +254,12 @@ dashboard can start or stop that timer. The dispatch host has no Herdr and runs
 no loops. Use the dashboard for all machines, and Herdr on a worker for its
 loops.
 
-`loops` reads Herdr's agent list and Lupin's saved loop state. Saved state stays
-visible without Herdr. `idle` and `working` mean `running`. `blocked` means
-`needs_attention`. `peek` reads a found agent pane, and reports the backend,
-session, workspace, and pane IDs. It does not infer state from pane text.
+`loops` matches Herdr agents to saved Lupin loops by pane or workspace ID.
+Other agents show as unmanaged in local and remote listings and on the Machines
+page. Saved state stays visible without Herdr. `idle` and `working` mean
+`running`. `blocked` means `needs_attention`. If any matched pane is blocked,
+the loop is `needs_attention`. `peek` reads a found agent pane and reports the
+backend, session, workspace, and pane IDs. It does not infer state from pane text.
 
 Each machine has one Herdr session, `lupin-loops`, and one Herdr server. Each
 run has one workspace in that session. Each workspace gets its repo's GitHub

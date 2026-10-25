@@ -22,6 +22,10 @@ All notable changes to Lupin. The version has one source:
   checks `origin/release/next` or `origin/master`, and CI no longer lists
   `release/next`.
 
+- `lupin loops` matches Herdr agents to saved loops by pane or workspace ID.
+  Other agents show as unmanaged in local and remote listings and on the
+  Machines page. A blocked pane keeps the loop in `needs_attention`.
+
 ### Fixed
 
 - The Roadmap page family uses one set of stage words (In progress, Ready,

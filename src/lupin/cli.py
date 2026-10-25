@@ -1128,7 +1128,7 @@ def _cmd_join(args: argparse.Namespace) -> int:
             redis_username=args.redis_username,
             redis_password=args.redis_password,
             config_path=args.config_path,
-            loops=loop_runtime.local_loops(),
+            loops=loop_runtime.local_loops(include_unmanaged=True),
             repos=serve.local_repo_inventory(),
         )
     except _REDIS_REFUSED as exc:
@@ -1145,7 +1145,7 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
     try:
         record = machines.heartbeat(
             _fleet_connection(args),
-            loops=loop_runtime.local_loops(),
+            loops=loop_runtime.local_loops(include_unmanaged=True),
             repos=serve.local_repo_inventory(),
         )
     except _REDIS_REFUSED as exc:
@@ -1978,7 +1978,8 @@ def _cmd_loops(args: argparse.Namespace) -> int:
         print(json.dumps(rows))
     else:
         for row in rows:
-            print(f"{row.get('repo', '?')}: {row.get('state', 'unknown')} ({row.get('backend', 'unknown')})")
+            repo = "unmanaged" if row.get("managed") is False else row.get("repo", "?")
+            print(f"{repo}: {row.get('state', 'unknown')} ({row.get('backend', 'unknown')})")
     return 0
 
 

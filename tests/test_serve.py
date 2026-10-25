@@ -514,6 +514,24 @@ class MachinesRouteUnitTests(unittest.TestCase):
         fake.assert_called_once_with({"redis_host": "127.0.0.1"}, strict=True)
         handler.reply.assert_called_once()
 
+    def test_render_machines_labels_unmanaged_agent_and_identity(self):
+        records = [{
+            "name": "worker",
+            "state": "online",
+            "loops": [{
+                "repo": None,
+                "managed": False,
+                "state": "working",
+                "agent": "omp",
+            }],
+        }]
+        with mock.patch.object(serve.machines, "hostname", return_value="reader"):
+            body = serve.render_machines(records, {}).decode()
+
+        self.assertIn("Unmanaged agent · omp", body)
+        self.assertIn("working", body)
+        self.assertNotIn("Unknown repo", body)
+
     def test_machines_route_unreachable_coordinator_is_502(self):
         handler = serve.Handler.__new__(serve.Handler)
         handler.path = "/machines"
@@ -2224,6 +2242,7 @@ class TestMachinesPageIntegration:
         assert body.count("class=machine-card") == 3
         assert "lupin · omp" in body
         assert "Draining. Running loops can finish" in body
+
 
     def test_unreachable_coordinator_is_502(self, closed_port):
         handler = _get_handler("/machines", {"redis_host": "127.0.0.1", "redis_port": closed_port})

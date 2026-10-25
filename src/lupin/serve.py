@@ -2308,7 +2308,12 @@ def render_machines(
             body.append("<div class=machine-loops><b>Loops</b>")
             if loops:
                 for loop in loops:
-                    label = loop.get("repo") or "Unknown repo"
+                    if loop.get("managed") is False:
+                        label = "Unmanaged agent"
+                        if loop.get("agent"):
+                            label += f" · {loop['agent']}"
+                    else:
+                        label = loop.get("repo") or "Unknown repo"
                     if loop.get("platform"):
                         label += f" · {loop['platform']}"
                     body.append(

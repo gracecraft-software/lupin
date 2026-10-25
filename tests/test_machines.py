@@ -352,6 +352,73 @@ def test_cli_join_heartbeat_drain_undrain_machines_roundtrip(
     assert f"{machines.hostname()}: online" in captured.out
 
 
+def test_remote_loops_include_unmanaged_agents_from_heartbeats(
+    redis_port, flush_redis, tmp_path, monkeypatch, capsys, clean_fleet_env
+):
+    loop_runtime = cli.loop_runtime
+    loops_dir = tmp_path / "herdr-loops"
+    loops_dir.mkdir()
+    (loops_dir / "widgets.json").write_text(
+        '{"repo":"widgets","platform":"omp","session":"lupin-loops",'
+        '"state":"running","started_at":"2026-01-01T00:00:00Z"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", loops_dir)
+    monkeypatch.setattr(loop_runtime, "loop_state", lambda repo: {
+        "repo": repo,
+        "state": "running",
+        "workspace_id": "saved",
+        "pane_id": "saved:p1",
+    })
+    agents = [
+        {
+            "workspace_id": "saved",
+            "pane_id": "managed:p1",
+            "agent_status": "working",
+            "agent": "omp",
+        },
+        {
+            "workspace_id": "outside",
+            "pane_id": "outside:p1",
+            "agent_status": "idle",
+            "agent": "claude",
+        },
+    ]
+    monkeypatch.setattr(loop_runtime, "_agents", lambda session: agents)
+    monkeypatch.setattr(cli.serve, "local_repo_inventory", lambda: [])
+    monkeypatch.setattr(machines, "hostname", lambda: "worker")
+    config_path = str(tmp_path / "fleet.json")
+    common = [
+        "--config-path",
+        config_path,
+        "--redis-host",
+        "127.0.0.1",
+        "--redis-port",
+        str(redis_port),
+    ]
+
+    assert cli.main(["join", f"127.0.0.1:{redis_port}", "--config-path", config_path]) == 0
+    joined = json.loads(capsys.readouterr().out)
+    joined_unmanaged = next(
+        row for row in joined["loops"] if row.get("managed") is False
+    )
+    assert joined_unmanaged["pane_id"] == "outside:p1"
+
+    agents[1] = {**agents[1], "pane_id": "outside-next:p1"}
+    assert cli.main(["heartbeat", *common]) == 0
+    capsys.readouterr()
+
+    monkeypatch.setattr(machines, "hostname", lambda: "reader")
+    code = cli.main(["loops", "--machine", "worker", "--json", *common])
+    captured = capsys.readouterr()
+    assert code == 0
+    rows = json.loads(captured.out)
+    managed = next(row for row in rows if row.get("managed") is not False)
+    assert managed["repo"] == "widgets"
+    unmanaged = next(row for row in rows if row.get("managed") is False)
+    assert unmanaged["pane_id"] == "outside-next:p1"
+
+
 def test_cli_machines_unreachable_redis_exits_3(closed_port, tmp_path, capsys, clean_fleet_env):
     common = [
         "--redis-host", "127.0.0.1", "--redis-port", str(closed_port),
