@@ -26,7 +26,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
@@ -2012,6 +2012,166 @@ def _snapshot_age(fetched_at: str | None) -> str:
         return "never pulled"
     return f"<span data-since='{epoch:.0f}'></span>"
 
+def _stale_tier_categories(rows: list[dict]) -> tuple[list[str], list[str]]:
+    today = date.today()
+    cutoff = today - timedelta(days=30)
+    stale = []
+    missing = []
+    for row in rows:
+        if "error" in row:
+            continue
+        category = str(row.get("category") or "unknown")
+        try:
+            verified = date.fromisoformat(row.get("last_verified"))
+        except (TypeError, ValueError):
+            missing.append(category)
+        else:
+            if verified < cutoff:
+                stale.append(category)
+    return stale, missing
+
+
+def _render_tier_verification_warning(rows: list[dict]) -> str:
+    stale, missing = _stale_tier_categories(rows)
+    messages = []
+    if stale:
+        names = ", ".join(esc(name) for name in stale)
+        count = len(stale)
+        noun = "category" if count == 1 else "categories"
+        verb = "has" if count == 1 else "have"
+        messages.append(
+            f"{count} model-tier {noun} {verb} not been verified in over 30 days: {names}."
+        )
+    if missing:
+        names = ", ".join(esc(name) for name in missing)
+        messages.append(f"Verification dates are missing for: {names}.")
+    if not messages:
+        return ""
+    return (
+        "<div class='card model-tier-warning' role='status'>"
+        f"{' '.join(messages)}</div>"
+    )
+
+
+def _render_tier_summary_benchmarks(category: dict | None) -> str:
+    if not category:
+        return "<span class=dim>No verified benchmark data.</span>"
+    benchmarks = category.get("benchmarks") or []
+    if not benchmarks:
+        note = category.get("note") or "No verified benchmark data."
+        return f"<span class=dim>{esc(note)}</span>"
+    rows = []
+    for benchmark in benchmarks:
+        name = esc(benchmark.get("name") or "Benchmark")
+        source = benchmark.get("source")
+        if isinstance(source, str) and source.startswith(("https://", "http://")):
+            name = (
+                f"<a href='{esc(source)}' target='_blank' rel='noopener'>{name}</a>"
+            )
+        rows.append(
+            f"<div>{name}<div class=dim>{esc(benchmark.get('metric') or '')}</div></div>"
+        )
+    return "".join(rows)
+
+
+def _render_tier_summary_scores(scores: list[dict]) -> str:
+    if not scores:
+        return "<span class=dim>No verified score</span>"
+    rows = []
+    for score in scores:
+        title = f"{score['benchmark']} · {score['metric']} · {score['source']}"
+        rows.append(
+            "<div class=tier-summary-score>"
+            f"<span class=mono title='{esc(title)}'>{score['score']:g}</span> "
+            f"<span class=dim>{esc(score['benchmark'])}</span></div>"
+        )
+    return "".join(rows)
+
+
+def _render_tier_summary_cell(
+    tier_row: dict,
+    tier: str,
+    category_id: str,
+    models: list[dict],
+    scores_by_model: dict,
+) -> str:
+    entries = tier_row.get("tiers", {}).get(tier)
+    picks = [
+        pick for pick in (entries if isinstance(entries, list) else [])
+        if isinstance(pick, dict) and pick.get("model")
+    ]
+    if not picks:
+        return "<span class=dim>none</span>"
+
+    pick = picks[0]
+    alias = pick["model"]
+    model = match_live_model(alias, models)
+    if model:
+        model_name = model.get("display_name") or model["id"]
+    else:
+        model_name = alias
+    cell = [
+        f"<div class=tier-summary-name>{esc(model_name)}</div>",
+        f"<div class=dim>effort {esc(pick.get('effort') or '-')}</div>",
+    ]
+    if model and model_name != model["id"]:
+        cell.append(f"<div class=dim><code>{esc(model['id'])}</code></div>")
+    if len(picks) > 1:
+        fallbacks = len(picks) - 1
+        suffix = "s" if fallbacks != 1 else ""
+        cell.append(f"<div class=dim>+{fallbacks} fallback{suffix}</div>")
+    if model:
+        scores = scores_by_model.get(model["id"], {}).get(category_id, [])
+        cell.append(_render_tier_summary_scores(scores))
+    else:
+        cell.append(
+            "<span class=dim>No live model match; no verified score</span>"
+        )
+    return "<div class=tier-summary-pick>" + "".join(cell) + "</div>"
+
+
+def render_tier_comparison(
+    rows: list[dict],
+    categories: list[dict],
+    models: list[dict],
+    scores_by_model: dict,
+) -> str:
+    benchmarks_by_category = {
+        category["id"]: category for category in categories
+    }
+    rendered = []
+    for row in rows:
+        if "error" in row:
+            continue
+        category_id = row["category"]
+        cells = "".join(
+            f"<td class='tier-summary-cell {tier}'>"
+            f"{_render_tier_summary_cell(row, tier, category_id, models, scores_by_model)}"
+            "</td>"
+            for tier in MODEL_TIER_ORDER
+        )
+        rendered.append(
+            "<tr>"
+            f"<th scope=row>{esc(category_id)}</th>"
+            f"<td>{_render_tier_summary_benchmarks(benchmarks_by_category.get(category_id))}</td>"
+            f"{cells}"
+            f"<td>{esc(row.get('source') or 'not recorded')}</td>"
+            f"<td>{esc(row.get('last_verified') or '-')}</td>"
+            "</tr>"
+        )
+    if not rendered:
+        return "<div class='card dim'>No category picks to compare.</div>"
+    headers = "".join(
+        f"<th scope=col>{esc(tier)}</th>" for tier in MODEL_TIER_ORDER
+    )
+    return (
+        "<div class='card scroll'><table class=model-tier-summary>"
+        "<caption class=dim>First pick in each tier. All fallbacks appear in the routing cards below.</caption>"
+        "<thead><tr><th scope=col>Category</th><th scope=col>Benchmark</th>"
+        f"{headers}<th scope=col>Routing source</th><th scope=col>Last verified</th>"
+        f"</tr></thead><tbody>{''.join(rendered)}</tbody></table></div>"
+    )
+
 
 def _format_score(scores: list[dict]) -> str:
     if not scores:
@@ -2143,25 +2303,63 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     benchmark_categories, scores_by_model, performance = benchmark_catalog.matrix(models, benchmark_snapshot)
     notes_by_model = benchmark_catalog.notes_by_model(benchmark_snapshot)
     benchmark_scores = (benchmark_snapshot or {}).get("scores") or []
-    scored_benchmarks = sum(
-        1 for score in benchmark_scores
-        if isinstance(score, dict) and score.get("score") is not None
+    scored_benchmarks = [
+        score for score in benchmark_scores
+        if isinstance(score, dict)
+        and isinstance(score.get("score"), (int, float))
+        and not isinstance(score.get("score"), bool)
+    ]
+    stale_benchmarks = [
+        score for score in scored_benchmarks
+        if not benchmark_fetch._is_fresh(score)
+    ]
+    subscriptions = (snapshot or {}).get("subscriptions")
+    if not isinstance(subscriptions, dict):
+        subscriptions = {}
+    stale_model_sources = sorted(
+        name for name, item in subscriptions.items()
+        if isinstance(item, dict) and item.get("live") is False
     )
+    model_status = (
+        f" <span class=stale>not live: {esc(', '.join(stale_model_sources))}</span>"
+        if stale_model_sources else ""
+    )
+    benchmark_status = (
+        "<span class=stale>latest refresh unavailable</span>"
+        if benchmark_snapshot and benchmark_snapshot.get("live") is False else ""
+    )
+    if stale_benchmarks:
+        count = len(stale_benchmarks)
+        noun = "score" if count == 1 else "scores"
+        score_freshness = f"<span class=stale>{count} stale source {noun}</span>"
+    elif scored_benchmarks:
+        score_freshness = "<span class=dim>all source scores fresh</span>"
+    else:
+        score_freshness = "<span class=dim>no verified scores</span>"
     body = [
         f'<header><h1>{icon("M7 7h10v10H7zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3")}Models</h1></header>',
     ]
     if sent:
         body.append(f"<p class=dim>{esc(sent)}</p>")
     body.append(
-        "<div class='card' style='display:flex;align-items:center;gap:1rem'>"
-        f"<span class=dim>Last pulled: {_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}</span>"
-        f"<span class=dim>General scores: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)} ({scored_benchmarks}/{len(benchmark_scores)} scored)</span>"
+        "<section class='card model-freshness' aria-label='Data freshness'>"
+        f"<span class=dim>Model list: {_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}{model_status}</span>"
+        f"<span class=dim>Benchmark scores: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)} "
+        f"({len(scored_benchmarks)}/{len(benchmark_scores)} scored)</span>"
+        f"{score_freshness}{benchmark_status}"
         "<span style='flex:1'></span>"
         "<form method=post action='/model-tiers/refresh'>"
         "<button type=submit>Pull models</button></form>"
         "<form method=post action='/model-tiers/refresh-benchmarks'>"
-        "<button type=submit>Pull benchmarks</button></form></div>"
+        "<button type=submit>Pull benchmarks</button></form></section>"
     )
+    body.extend([
+        _render_tier_verification_warning(rows),
+        "<h2>Category and tier comparison</h2>",
+        "<p class=dim>First pick in each tier. Scores use exact model IDs and verified sources. "
+        "See every fallback in the routing cards below.</p>",
+        render_tier_comparison(rows, benchmark_categories, models, scores_by_model),
+    ])
     body.extend([
         "<h2>Routing by task category</h2>",
         "<p class=dim>Read from <code>"
@@ -2210,7 +2408,18 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
             models, benchmark_categories, scores_by_model, performance, notes_by_model
         ),
     ])
-    return page("Model tiers", "".join(body), active="models")
+    extra_css = """
+.model-freshness{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
+.model-tier-warning{background:var(--warnbg);border-color:var(--warnline);box-shadow:none}
+.model-tier-summary th,.model-tier-summary td{vertical-align:top}
+.model-tier-summary .tier-summary-cell{min-width:9rem}
+.model-tier-summary .tier-summary-name{font-weight:500}
+.model-tier-summary .tier-summary-score{white-space:nowrap}
+.model-tier-summary caption{text-align:left}
+"""
+    return page(
+        "Model tiers", "".join(body), extra_css=extra_css, active="models"
+    )
 
 
 def _heartbeat_epoch(stamp: str | None) -> float | None:

@@ -950,8 +950,9 @@ class AllModelsTableTests(unittest.TestCase):
         ):
             page = serve.render_model_tiers(connection={"redis_host": "fleet"}).decode()
 
+        expected = serve.datetime.fromisoformat(shared["fetched_at"]).timestamp()
+        self.assertIn(f"data-since='{expected:.0f}'", page)
         self.assertIn("claude-opus-4-5", page)
-        self.assertNotIn("Last pulled: never pulled", page)
 
     def test_no_snapshot_file_shows_placeholder_not_a_crash(self):
         self.write_tiers({"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "high"}]}}})
@@ -1035,6 +1036,73 @@ class AllModelsTableTests(unittest.TestCase):
         self.assertIn("href='https://example.org/glm-note'", page)
         self.assertIn("No private model tests were run", page)
 
+    def test_tier_comparison_uses_exact_model_scores_and_warns_on_stale_rows(self):
+        self.write_tiers({
+            "general": {
+                "source": "Artificial Analysis Intelligence Index",
+                "last_verified": "2000-01-01",
+                "tiers": {
+                    "tier1": [
+                        {"model": "openai-codex/gpt-9-1", "effort": "high"},
+                        {"model": "openai-codex/gpt-9-2", "effort": "low"},
+                    ],
+                    "tier2": [
+                        {"model": "openai-codex/gpt-9-2", "effort": "high"},
+                    ],
+                },
+            },
+        })
+        self.write_snapshot({
+            "fetched_at": "2000-01-01T00:00:00+00:00",
+            "subscriptions": {
+                "codex": {
+                    "live": True,
+                    "models": [
+                        {"id": "gpt-9-1", "display_name": "GPT 9.1"},
+                        {"id": "gpt-9-2", "display_name": "GPT 9.2"},
+                    ],
+                },
+            },
+        })
+        benchmark_snapshot = {
+            "fetched_at": "2000-01-01T00:00:00+00:00",
+            "live": True,
+            "scores": [{
+                "id": "gpt-9-2",
+                "score": 82,
+                "scale": "Artificial Analysis Intelligence Index (0-100)",
+                "source": "https://artificialanalysis.ai/leaderboards/models",
+                "fetched_at": "2000-01-01T00:00:00+00:00",
+            }],
+        }
+        with mock.patch.object(
+            serve.benchmark_fetch, "read_snapshot", return_value=benchmark_snapshot
+        ):
+            page = self.render()
+
+        warning = page.index("1 model-tier category has not been verified in over 30 days")
+        comparison = page.index("<h2>Category and tier comparison</h2>")
+        routing = page.index("<h2>Routing by task category</h2>")
+        self.assertLess(page.index("Model list:"), warning)
+        self.assertLess(warning, comparison)
+        self.assertLess(comparison, routing)
+        self.assertIn("1 stale source score", page)
+        row_start = page.index("<th scope=row>general</th>")
+        row_end = page.index("</tr>", row_start)
+        row = page[row_start:row_end]
+        tier1_start = row.index("class='tier-summary-cell tier1'>")
+        tier1 = row[tier1_start:row.index("</td>", tier1_start)]
+        tier2_start = row.index("class='tier-summary-cell tier2'>")
+        tier2 = row[tier2_start:row.index("</td>", tier2_start)]
+        self.assertIn("GPT 9.1", tier1)
+        self.assertIn("+1 fallback", tier1)
+        self.assertIn("No verified score", tier1)
+        self.assertNotIn("82", tier1)
+        self.assertIn("GPT 9.2", tier2)
+        self.assertIn("82", tier2)
+        self.assertIn("gpt-9-2", page[routing:])
+        self.assertIn("<h2>All models</h2>", page[routing:])
+
     def test_perf_uses_unavailable_benchmark_leader_as_denominator(self):
         model = {"id": "glm-5.3"}
         _categories, _scores, performance = serve.benchmark_catalog.matrix([model], None)
@@ -1062,18 +1130,25 @@ class AllModelsTableTests(unittest.TestCase):
     def test_benchmark_status_counts_only_numeric_scores(self):
         self.write_tiers({})
         benchmark_snapshot = {
-            "fetched_at": "2026-10-07T06:00:00+00:00",
+            "fetched_at": "2000-01-01T06:00:00+00:00",
             "live": True,
             "scores": [
                 {"id": "one", "score": None, "reason": "unable to verify"},
-                {"id": "two", "score": None, "reason": "unable to verify"},
+                {"id": "two", "score": "unknown"},
+                {"id": "three", "score": True},
+                {
+                    "id": "four",
+                    "score": 12.5,
+                    "fetched_at": "2000-01-01T00:00:00+00:00",
+                },
             ],
         }
         with mock.patch.object(
             serve.benchmark_fetch, "read_snapshot", return_value=benchmark_snapshot
         ):
             page = self.render()
-        self.assertIn("(0/2 scored)", page)
+        self.assertIn("(1/4 scored)", page)
+        self.assertIn("1 stale source score", page)
 
     def test_sent_message_is_shown_and_escaped(self):
         self.write_tiers({})

@@ -18,6 +18,10 @@ All notable changes to Lupin. The version has one source:
 
 ### Changed
 
+- The Models page shows when it fetched model and benchmark data. It warns
+  about old or undated routing lists and compares current picks with verified
+  scores.
+
 - `lupin run` starts from `origin/HEAD`, or else `origin/main`. It no longer
   checks `origin/release/next` or `origin/master`, and CI no longer lists
   `release/next`.
