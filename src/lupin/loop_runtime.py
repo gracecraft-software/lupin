@@ -20,7 +20,7 @@ from typing import Any
 
 import redis
 
-from . import claims, run_log, slots, slots_redis
+from . import claim_labels, claims, run_log, slots, slots_redis
 
 # A loop id is a repo name. `repo~2` is a second loop on the same repo on this
 # machine, `repo~3` a third, and so on. There is no `repo~1`: that is `repo`.
@@ -1390,9 +1390,13 @@ def _renew_claims(repo: str, holder: str, stop: threading.Event) -> None:
     while not stop.wait(CLAIM_RENEW_INTERVAL):
         what = f"renewing the claims of {holder}"
         try:
-            claims.renew_holder_claims(holder, ttl=claims.DEFAULT_TTL, **_redis_kwargs())
+            claim_labels.renew_holder_claims(
+                holder, ttl=claims.DEFAULT_TTL, **_redis_kwargs()
+            )
         except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
             line = slots_redis.refusal_message(exc, what, fleet=True)
+        except claim_labels.ClaimLabelSyncError as exc:
+            line = str(exc)
         except slots.CoordinatorUnreachable:
             line = f"cannot reach the redis coordinator for {what}"
         except redis.exceptions.RedisError as exc:

@@ -9,13 +9,20 @@ import os
 
 from unittest import mock
 
-from lupin import claims
-from lupin import cli
+import pytest
+
+from lupin import claim_labels, claims, cli
 from lupin import dispatch as dispatch_mod
 from lupin import loop_runtime
 from lupin import review_dispatch
 from lupin import slots_redis
 
+
+@pytest.fixture(autouse=True)
+def _disable_claim_label_sync(monkeypatch):
+    monkeypatch.setattr(
+        claim_labels, "sync_claimed_label", lambda target, **connection: None
+    )
 
 ISSUE = {
     "kind": "issue",
@@ -140,6 +147,24 @@ def test_gh_error_exits_1_and_releases_the_claim(tmp_path):
     assert release.call_args.args == ("o/r#5", "holder")
     start.assert_not_called()
     assert not list((tmp_path / "notes").glob("dispatch-*"))
+
+
+def test_prefetch_failure_keeps_preexisting_same_holder_claim(
+    redis_port, flush_redis, tmp_path, monkeypatch
+):
+    target = "o/r#5"
+    connection = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    claims.claim(target, "holder", **connection)
+    monkeypatch.setattr(
+        dispatch_mod.review_dispatch,
+        "prefetch",
+        _prefetch({"error": "not a fetchable issue or PR"}),
+    )
+
+    with pytest.raises(dispatch_mod.DispatchError):
+        dispatch_mod.dispatch(target, "holder", state_dir=tmp_path, **connection)
+
+    assert claims.claims_for(["o/r"], **connection)[target]["session"] == "holder"
 
 
 def test_busy_claim_exits_2_without_starting(tmp_path):

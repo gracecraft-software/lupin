@@ -15,7 +15,13 @@ from unittest import mock
 import pytest
 import redis as redis_lib
 
-from lupin import cli, claims, machines, place, quest, roadmap
+from lupin import claim_labels, cli, claims, machines, place, quest, roadmap
+
+
+@pytest.fixture(autouse=True)
+def _disable_github_claim_labels(monkeypatch):
+    monkeypatch.setattr(claim_labels, "add_claimed_label", lambda target: None)
+    monkeypatch.setattr(claim_labels, "remove_claimed_label", lambda target: None)
 
 
 def _task_node(number, title, state, merged=False):
@@ -580,6 +586,25 @@ def test_claim_all_rolls_back_when_a_later_issue_is_already_claimed(redis_port, 
     # #24 still belongs to its real, pre-existing holder -- our rollback
     # must not touch a claim it doesn't own.
     assert remaining["acme/repo-b#24"]["session"] == "someone-else"
+
+
+def test_claim_all_keeps_preexisting_same_holder_claim_during_rollback(
+    redis_port, flush_redis
+):
+    connection = _kw(redis_port)
+    claims.claim("acme/repo-a#23", "quest:q1", **connection)
+    claims.claim("acme/repo-b#24", "someone-else", **connection)
+    resolved = {
+        23: ("repo-a", "acme/repo-a#23"),
+        24: ("repo-b", "acme/repo-b#24"),
+    }
+
+    with pytest.raises(quest.IssueClaimed, match=r"#24 is claimed by someone-else\."):
+        quest._claim_all(resolved, [23, 24], "quest:q1", connection)
+
+    held = claims.claims_for(["acme/repo-a", "acme/repo-b"], **connection)
+    assert held["acme/repo-a#23"]["session"] == "quest:q1"
+    assert held["acme/repo-b#24"]["session"] == "someone-else"
 
 
 def test_claim_all_refuses_when_the_holder_record_is_unreadable(redis_port, flush_redis):

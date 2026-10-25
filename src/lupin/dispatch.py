@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 from . import claims
+from . import claim_labels
 from . import loop_runtime
 from . import review_dispatch
 
@@ -76,9 +77,8 @@ def dispatch(
 
     Raises `DispatchError` for a missing holder, a failed fetch, a failed
     brief write, or a start that returned false. A failed fetch or write
-    releases the claim; `no_start` and a failed start keep it. Claim errors
-    keep their own exception type so the CLI can map them to the same exit
-    codes as `claim`.
+    releases a new claim from this call; an existing same-holder claim stays
+    active. `no_start` and a failed start keep the claim.
     """
     if not holder:
         raise DispatchError("dispatch needs --holder or LUPIN_CLAIM_HOLDER")
@@ -91,30 +91,33 @@ def dispatch(
         "redis_password": redis_password,
     }
 
-    claims.claim(target, holder, **connection)
+    created = claim_labels.claim(target, holder, **connection)
 
     fetched = review_dispatch.prefetch([str(number)], repo=f"{owner}/{repo}")
     data = fetched[str(number)]
     if "error" in data:
-        # Leave no claim behind for a brief we refuse to build.
-        try:
-            claims.release_claim(target, holder, **connection)
-        except Exception:
-            pass  # the claim's TTL is the backstop
+        if created:
+            try:
+                claim_labels.release_claim(target, holder, **connection)
+            except Exception as cleanup_error:
+                raise DispatchError(
+                    f"{data['error']}; could not clean up the claim: {cleanup_error}"
+                ) from cleanup_error
         raise DispatchError(data["error"])
 
     brief = review_dispatch.brief_markdown(target, data)
     try:
         path = write_brief(target, brief, state_dir=state_dir)
     except OSError as error:
-        # Leave no claim behind for a brief that never reached disk.
-        try:
-            claims.release_claim(target, holder, **connection)
-        except Exception:
-            pass  # the claim's TTL is the backstop
-        raise DispatchError(
-            f"could not write the brief for {target}: {error}"
-        ) from error
+        if created:
+            try:
+                claim_labels.release_claim(target, holder, **connection)
+            except Exception as cleanup_error:
+                raise DispatchError(
+                    f"could not write the brief for {target}: {error}; "
+                    f"could not clean up the claim: {cleanup_error}"
+                ) from error
+        raise DispatchError(f"could not write the brief for {target}: {error}") from error
 
     started = False
     message = ""

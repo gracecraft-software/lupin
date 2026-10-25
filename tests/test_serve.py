@@ -23,9 +23,27 @@ import pytest
 import redis as redis_lib
 
 from lupin import (
-    agent, cli, claims, commands, ledger, machines, quest, quota_cache, roadmap, serve,
-    slots, slots_redis, usage_cache,
+    agent,
+    claim_labels,
+    cli,
+    claims,
+    commands,
+    ledger,
+    machines,
+    quest,
+    quota_cache,
+    roadmap,
+    serve,
+    slots,
+    slots_redis,
+    usage_cache,
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_github_claim_labels(monkeypatch):
+    monkeypatch.setattr(claim_labels, "add_claimed_label", lambda target: None)
+    monkeypatch.setattr(claim_labels, "remove_claimed_label", lambda target: None)
 
 
 def _kw(redis_port):

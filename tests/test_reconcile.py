@@ -13,7 +13,14 @@ import time
 import pytest
 import redis as redis_lib
 
-from lupin import cli, claims, machines, quest, reconcile, slots_redis
+from lupin import claim_labels, cli, claims, machines, quest, reconcile, slots_redis
+
+_REAL_SYNC_CLAIM_LABELS = reconcile._sync_claim_labels
+
+
+@pytest.fixture(autouse=True)
+def _disable_github_claim_labels(monkeypatch):
+    monkeypatch.setattr(reconcile, "_sync_claim_labels", lambda *args, **kwargs: [])
 
 
 def _kw(redis_port):
@@ -412,3 +419,35 @@ def test_release_lost_claims_keeps_a_renewed_claim_and_releases_one_nothing_rene
     client = _client(redis_port)
     assert client.get(f"{claims.PREFIX}claim:acme/repo#1") is not None
     assert client.get(f"{claims.PREFIX}claim:acme/repo#2") is None
+
+
+def test_cli_reconcile_reports_label_sync_failure(
+    redis_port, flush_redis, clean_fleet_env, capsys, monkeypatch
+):
+    target = "acme/repo#17"
+    connection = _kw(redis_port)
+    claims.claim(target, "worker", **connection)
+    claims.release_claim(target, "worker", **connection)
+    monkeypatch.setattr(reconcile, "_sync_claim_labels", _REAL_SYNC_CLAIM_LABELS)
+    monkeypatch.setattr(cli.serve, "enabled_repos", lambda: [])
+    monkeypatch.setattr(cli.serve, "code_repos", lambda: [])
+
+    def fail_remove(_item):
+        raise claim_labels.GitHubAPIError(403, "write denied")
+
+    monkeypatch.setattr(claim_labels, "remove_claimed_label", fail_remove)
+    monkeypatch.setattr(claim_labels, "list_claimed_issues", lambda owner, repo: [17])
+
+    code = cli.main([
+        "reconcile",
+        "--redis-host", "127.0.0.1",
+        "--redis-port", str(redis_port),
+        "--json",
+    ])
+    captured = capsys.readouterr()
+
+    warning = f"GitHub claim label sync failed for {target}: write denied"
+    assert code == 1
+    assert json.loads(captured.out) == {"released": [], "warnings": [warning]}
+    assert warning in captured.err
+    assert target in claims._indexed_targets(**connection)

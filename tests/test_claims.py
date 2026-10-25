@@ -6,12 +6,19 @@ Uses the real `redis-server` fixtures in `conftest.py` -- `redis_port`,
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
 import redis as redis_lib
 
-from lupin import cli, claims, slots
+from lupin import claim_labels, cli, claims, slots
+
+
+@pytest.fixture(autouse=True)
+def _disable_github_claim_labels(monkeypatch):
+    monkeypatch.setattr(claim_labels, "add_claimed_label", lambda target: None)
+    monkeypatch.setattr(claim_labels, "remove_claimed_label", lambda target: None)
 
 
 class _FakePipeline:
@@ -128,6 +135,36 @@ def test_claim_succeeds_and_is_visible_in_redis(redis_port, flush_redis):
     assert '"session": "host-a:session-1"' in value or "session" in value
 
 
+def test_claim_generation_rotates_on_retry_and_renewal(
+    redis_port, flush_redis
+):
+    target = "gracecraft/lupin#6"
+    key = f"lupin:v1:claim:{target}"
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+
+    claims.claim(target, "same-holder", generation="first", **kw)
+    first_generation = json.loads(raw.get(key))["generation"]
+    assert first_generation == "first"
+    assert "generation" not in claims.claims_for(["gracecraft/lupin"], **kw)[target]
+
+    assert claims.renew_claim(target, "same-holder", **kw) is True
+    assert json.loads(raw.get(key))["generation"] != first_generation
+    assert "generation" not in claims.claims_for(["gracecraft/lupin"], **kw)[target]
+
+    assert claims.claim(target, "same-holder", generation="second", **kw) is False
+    assert json.loads(raw.get(key))["generation"] == "second"
+
+    legacy_target = "gracecraft/lupin#7"
+    legacy_key = f"lupin:v1:claim:{legacy_target}"
+    raw.set(
+        legacy_key,
+        json.dumps({"host": "old-host", "session": "legacy-holder", "since": 1}),
+        ex=30,
+    )
+    assert claims.renew_claim(legacy_target, "legacy-holder", **kw) is True
+    assert "generation" not in json.loads(raw.get(legacy_key))
+
 def test_claim_is_idempotent_for_the_same_holder(redis_port, flush_redis):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     claims.claim("gracecraft/lupin#6", "same-holder", **kw)
@@ -140,6 +177,49 @@ def test_claim_fails_when_already_held_by_someone_else(redis_port, flush_redis):
     claims.claim("gracecraft/lupin#6", "first-holder", **kw)
     with pytest.raises(claims.ClaimHeld):
         claims.claim("gracecraft/lupin#6", "second-holder", **kw)
+
+
+def test_claim_held_hides_generation_and_shows_safe_holder_fields(
+    redis_port, flush_redis
+):
+    target = "gracecraft/lupin#6"
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set(
+        f"{claims.PREFIX}claim:{target}",
+        json.dumps(
+            {
+                "host": "safe-host",
+                "session": "safe-holder",
+                "since": 123,
+                "generation": "private-generation",
+            }
+        ),
+    )
+
+    with pytest.raises(claims.ClaimHeld) as exc:
+        claims.claim(target, "other-holder", **kw)
+
+    message = str(exc.value)
+    assert "private-generation" not in message
+    assert "host='safe-host'" in message
+    assert "session='safe-holder'" in message
+    assert "since=123" in message
+
+
+@pytest.mark.parametrize("raw_value", ["not-json", "[1, 2]"])
+def test_claim_held_uses_unknown_holder_for_malformed_values(
+    redis_port, flush_redis, raw_value
+):
+    target = "gracecraft/lupin#6"
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set(f"{claims.PREFIX}claim:{target}", raw_value)
+
+    with pytest.raises(claims.ClaimHeld) as exc:
+        claims.claim(target, "other-holder", **kw)
+
+    assert str(exc.value).endswith("unknown holder")
 
 
 def test_renew_claim_fails_for_non_holder(redis_port, flush_redis):
@@ -417,3 +497,22 @@ def test_claim_without_holder_or_lupin_claim_holder_is_a_usage_error(capsys):
         cli.main(["claim", "acme/repo#4"])
     assert exc.value.code == 2
     assert "--holder" in capsys.readouterr().err
+
+
+def test_cli_claim_label_failure_exits_one_and_rolls_back(
+    redis_port, flush_redis, capsys, monkeypatch
+):
+    def fail(_target):
+        raise claim_labels.GitHubAPIError(403, "write denied")
+
+    monkeypatch.setattr(claim_labels, "add_claimed_label", fail)
+    common = ["--redis-host", "127.0.0.1", "--redis-port", str(redis_port)]
+
+    code = cli.main(["claim", "acme/repo#4", "--holder", "worker", *common])
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "the Redis claim was released" in captured.err
+    assert claims.claims_for(
+        ["acme/repo"], redis_host="127.0.0.1", redis_port=redis_port
+    ) == {}

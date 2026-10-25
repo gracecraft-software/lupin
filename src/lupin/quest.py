@@ -24,7 +24,7 @@ import time
 
 import redis
 
-from . import claims, gh_cache, machines, place as place_mod, roadmap, slots_redis
+from . import claim_labels, claims, gh_cache, machines, place as place_mod, roadmap, slots_redis
 from .roadmap import CODE_DIR
 from .slots import CoordinatorUnreachable
 
@@ -819,29 +819,35 @@ def _resolve_machine(machine: str | None, issue_numbers: list[int], connection: 
 
 
 def _claim_all(resolved: dict, issue_numbers: list[int], holder: str, connection: dict) -> None:
-    """Claim every issue in order. If any claim fails -- someone else got
-    there first (a race past the earlier `_check_claims` pre-check), or
-    Redis drops mid-way -- release everything this call already claimed,
-    so a quest never half-starts.
+    """Claim issues in order; on failure, release only claims created here.
+
+    Keep any same-holder claim that was active before this call.
     """
     claimed_targets = []
     try:
         for number in issue_numbers:
             _repo, target = resolved[number]
             try:
-                claims.claim(target, holder, **connection)
+                created = claim_labels.claim(target, holder, **connection)
             except claims.ClaimHeld:
                 owner_repo = target.rpartition("#")[0]
                 existing = claims.claims_for([owner_repo], strict=True, **connection)
                 held = existing.get(target, {})
                 raise IssueClaimed(number, held.get("session", "another loop")) from None
-            claimed_targets.append(target)
-    except Exception:
+            if created:
+                claimed_targets.append(target)
+    except Exception as claim_error:
+        cleanup_errors = []
         for target in claimed_targets:
             try:
-                claims.release_claim(target, holder, **connection)
-            except CoordinatorUnreachable:
-                pass
+                claim_labels.release_claim(target, holder, **connection)
+            except Exception as cleanup_error:
+                cleanup_errors.append(f"{target}: {cleanup_error}")
+        if cleanup_errors:
+            raise claim_labels.ClaimLabelSyncError(
+                f"quest claim failed ({claim_error}); could not clean up all claims: "
+                + "; ".join(cleanup_errors)
+            ) from claim_error
         raise
 
 
@@ -997,7 +1003,7 @@ def stop(quest_id: str, *, connection: dict) -> str:
     released = [
         number
         for number, target in zip(issues, targets)
-        if claims.release_claim(target, holder, **connection)
+        if claim_labels.release_claim(target, holder, **connection)
     ]
     _delete_quest(quest_id, connection)
     if not released:

@@ -13,8 +13,14 @@ from pathlib import Path
 
 import pytest
 
-from lupin import claims, loop_runtime
+from lupin import claim_labels, claims, loop_runtime
 from lupin.quota import QuotaDuration
+
+
+@pytest.fixture(autouse=True)
+def _disable_github_claim_labels(monkeypatch):
+    monkeypatch.setattr(claim_labels, "add_claimed_label", lambda target: None)
+    monkeypatch.setattr(claim_labels, "remove_claimed_label", lambda target: None)
 
 
 def test_systemd_run_uses_nixos_sudo_wrapper_when_not_on_path(monkeypatch, tmp_path):

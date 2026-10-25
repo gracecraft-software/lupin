@@ -42,11 +42,10 @@ straight into the focus record's JSON (not through `quest.write_focus`,
 which would also reset `since`/`pinned`). It is private bookkeeping for
 this module only -- nothing else reads it.
 
-Judgment call -- claims are scanned fleet-wide, not filtered to this
-machine's own enabled repos: unlike `claims.claims_for` (built for "is one
-of *my* issues claimed"), a lost claim belongs to the whole fleet, whether
-or not this particular caller has that repo checked out locally. So this
-module scans every `claim:*` key itself instead of calling `claims_for`.
+Judgment call -- reconcile checks claims across the fleet, not only repos enabled
+on this machine. Lost claims apply to any repo. `claims.claims_for` filters by
+exact repo names, so reconcile uses `claims._scan_claim_values` for the full
+claim scan.
 
 Not done here (explicitly out of scope for issue #14, not silently
 dropped):
@@ -71,11 +70,12 @@ uses, not reinvented here.
 from __future__ import annotations
 
 import json
+import os
 import time
 
 import redis
 
-from . import claims, machines, place as place_mod, quest, roadmap, slots_redis
+from . import claim_labels, claims, machines, place as place_mod, quest, roadmap, slots_redis
 from .roadmap import CODE_DIR
 
 CoordinatorUnreachable = slots_redis.CoordinatorUnreachable
@@ -110,18 +110,89 @@ def _client(connection: dict):
 
 
 def _scan_claims(client) -> dict[str, dict]:
-    """Every current claim, fleet-wide -- see this module's docstring for
-    why this scans directly instead of calling `claims.claims_for`.
-    """
-    prefix = f"{claims.PREFIX}claim:"
-    keys = _run(lambda: list(client.scan_iter(match=f"{prefix}*", count=slots_redis.SCAN_COUNT)))
-    result: dict[str, dict] = {}
-    for key in keys:
-        raw = _run(lambda k=key: client.get(k))
-        if raw is None:
+    """Every current claim, fleet-wide."""
+    try:
+        return {
+            target: json.loads(raw)
+            for target, raw in claims._scan_claim_values(client=client).items()
+        }
+    except CoordinatorUnreachable as exc:
+        raise CoordinatorUnreachable("reconcile") from exc
+
+
+def _sync_claim_labels(repos: list[str], connection: dict, *, code_dir: str) -> list[str]:
+    client = _client(connection)
+    active_claims = _scan_claims(client)
+    targets = set(active_claims) | claims._indexed_targets(client=client)
+    active_by_repo: dict[str, set[str]] = {}
+    targets_by_repo: dict[str, set[str]] = {}
+    repo_ids = {}
+    for target in sorted(targets):
+        owner_repo = target.rpartition("#")[0]
+        owner, name = owner_repo.split("/", 1)
+        repo_key = owner_repo.casefold()
+        targets_by_repo.setdefault(repo_key, set()).add(target)
+        repo_ids.setdefault(repo_key, (owner, name))
+    for target in sorted(active_claims):
+        owner_repo = target.rpartition("#")[0]
+        owner, name = owner_repo.split("/", 1)
+        repo_key = owner_repo.casefold()
+        active_by_repo.setdefault(repo_key, set()).add(target)
+        repo_ids[repo_key] = (owner, name)
+    warnings = []
+    for repo in dict.fromkeys(repos):
+        owner, name, error = roadmap._repo_identity(os.path.join(code_dir, repo))
+        if error:
+            warnings.append(
+                f"GitHub claim label sync failed for {repo}: {error}"
+            )
             continue
-        result[key[len(prefix) :]] = json.loads(raw)
-    return result
+        repo_ids.setdefault(f"{owner}/{name}".casefold(), (owner, name))
+
+    for repo_key, (owner, name) in sorted(repo_ids.items()):
+        owner_repo = f"{owner}/{name}"
+        active = active_by_repo.get(repo_key, set())
+        active_numbers = {
+            int(target.rsplit("#", 1)[1]) for target in active
+        }
+        for target in sorted(active):
+            try:
+                github_target = f"{owner_repo}#{target.rsplit('#', 1)[1]}"
+                claim_labels.sync_claimed_label(
+                    target, github_target=github_target, client=client
+                )
+            except claim_labels.GitHubAPIError as exc:
+                warnings.append(f"GitHub claim label sync failed for {target}: {exc}")
+        try:
+            labeled = claim_labels.list_claimed_issues(owner, name)
+        except claim_labels.GitHubAPIError as exc:
+            warnings.append(
+                f"GitHub claim label sync failed for {owner_repo}: {exc}"
+            )
+            continue
+        indexed_targets = targets_by_repo.get(repo_key, set())
+        indexed_numbers = {
+            int(target.rsplit("#", 1)[1]) for target in indexed_targets
+        }
+        stale = {
+            target
+            for target in indexed_targets
+            if int(target.rsplit("#", 1)[1]) not in active_numbers
+        }
+        stale.update(
+            f"{owner_repo}#{number}"
+            for number in labeled
+            if number not in active_numbers and number not in indexed_numbers
+        )
+        for target in sorted(stale):
+            try:
+                github_target = f"{owner_repo}#{target.rsplit('#', 1)[1]}"
+                claim_labels.sync_claimed_label(
+                    target, github_target=github_target, client=client
+                )
+            except claim_labels.GitHubAPIError as exc:
+                warnings.append(f"GitHub claim label sync failed for {target}: {exc}")
+    return warnings
 
 
 def _scan_focuses(client) -> dict[str, dict]:
@@ -323,16 +394,30 @@ def _release_started_quests(repos: list[str], connection: dict, *, code_dir: str
     return lines
 
 
-def reconcile(repos: list[str], connection: dict, *, code_dir: str = CODE_DIR) -> tuple[list[str], list[str]]:
-    """Run every shipped release rule once. Returns `(lines, warnings)`:
-    `lines` is one printed line per release/move, in order (claims, quest
-    focuses, started quests); `warnings` carries through any repo-read
-    problems `quest.load_quests` hit along the way. Raises
-    `CoordinatorUnreachable` if Redis can't be reached.
+def reconcile(
+    repos: list[str],
+    connection: dict,
+    *,
+    code_dir: str = CODE_DIR,
+    label_repos: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Run every shipped release rule once. Return `(lines, warnings)`.
+
+    `warnings` includes repo-read and GitHub label-sync errors. `label_repos`
+    names local checkouts to scan for stale labels. When unset, `repos`
+    supplies that list. Reconcile runs once, so the scheduler sets the maximum
+    delay before expired labels are removed.
     """
     quests, warnings = quest.load_quests(repos, code_dir=code_dir)
     lines = []
     lines.extend(_release_lost_claims(connection))
     lines.extend(_release_quest_focuses(quests, repos, connection, code_dir=code_dir))
     lines.extend(_release_started_quests(repos, connection, code_dir=code_dir))
+    warnings.extend(
+        _sync_claim_labels(
+            label_repos if label_repos is not None else repos,
+            connection,
+            code_dir=code_dir,
+        )
+    )
     return lines, warnings
