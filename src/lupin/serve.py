@@ -3105,7 +3105,12 @@ def render_debrief_index(items: list[dict]) -> bytes:
         f"{' &middot; no changes' if item['quiet'] else '' if item['has_digest'] or item['record_only'] else ' &middot; no digest'}</span></li>"
         for item in items
     )
-    listing = f"<ul>{rows}</ul>" if rows else "<p class=dim>No debriefs yet.</p>"
+    listing = f"<ul>{rows}</ul>" if rows else (
+        "<div class=dim><p>No debriefs yet.</p>"
+        "<p>Debriefs are written to the local <code>debriefs/</code> folder. "
+        "The fleet shares their digests here. Run <code>lupin agent</code> "
+        "to write periodic debriefs.</p></div>"
+    )
     return page(
         "Debriefs",
         f"<header><h1>Debriefs</h1></header><div class=card>{listing}</div>",
