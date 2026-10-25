@@ -1000,7 +1000,7 @@ box-shadow:0 3px 0 var(--line);padding:.9rem 1.1rem;margin-bottom:.7rem}
 .pill{font-size:.75rem;padding:.15rem .6rem;border-radius:99px;
 border:1px solid var(--line);color:var(--ink2)}
 .pill.on{color:var(--ok);border-color:var(--ok)}
-.pill.off{color:var(--warn);border-color:var(--warn)}
+.pill.off{color:var(--warnink);border-color:var(--warn)}
 .big{font-size:1.05rem;font-weight:600}
 pre{background:var(--term);color:var(--termink);border-radius:14px;
 padding:.6rem .7rem;overflow-x:auto;font:400 12px/1.5 var(--mono);margin:.6rem 0 0;
@@ -1099,6 +1099,7 @@ color:var(--dim)}
 .tier-pick{display:inline-flex;gap:.4rem;align-items:baseline;
 border:1px solid var(--line);border-radius:6px;padding:.1rem .45rem;
 background:var(--code)}
+.tier-pick.dim,.tier-pick .dim{color:var(--ink2)}
 .tier-model{font:500 .9rem ui-monospace,monospace}
 .tier-arrow{color:var(--dim)}
 .tier-note{margin:.15rem 0 0;font-size:.85rem}
