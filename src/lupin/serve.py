@@ -2641,7 +2641,7 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
             f"<td><span class='dot {dot}'></span> {esc(sess_label)} {stepper}</td>"
             f"<td>{esc(r['machine'])}</td><td>{roadmap_link}</td><td>{actions}</td></tr>"
         )
-    return "<div class=card><table>" + "".join(rows) + "</table></div>"
+    return "<div class='card scroll'><table>" + "".join(rows) + "</table></div>"
 
 
 def render_repos(
