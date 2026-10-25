@@ -29,6 +29,7 @@ All notable changes to Lupin. The version has one source:
   graph. The empty states keep the selected repositories visible, the note
   under the board uses plain words, the priority filter offers P4, and the
   epics footer and the pager read the same way when the list is empty.
+- On phones, selecting a Roadmap issue scrolls its detail panel into view.
 - Roadmap repo-fetch warnings can be dismissed on Board and List. A dismissal
   stays hidden after a reload and applies to one repo and warning.
 - `lupin roadmap` text output shows one line per repo for issues with no

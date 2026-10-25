@@ -418,6 +418,11 @@ def _roadmap_loader_script() -> str:
     holder.innerHTML=html;
     box.replaceWith(holder.content);
     if(window.lupinHideDismissedRoadmapWarnings)window.lupinHideDismissedRoadmapWarnings(document);
+    if(window.matchMedia("(max-width: 760px)").matches
+       && new URLSearchParams(window.location.search).has("issue")){
+      var detail=document.querySelector(".roadmap-detail:not(.roadmap-detail-empty)");
+      if(detail)detail.scrollIntoView({block:"start"});
+    }
   }).catch(function(){location.href=box.dataset.full;});
 })();
 """
