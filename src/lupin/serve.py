@@ -2644,6 +2644,37 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
     return "<div class=card><table>" + "".join(rows) + "</table></div>"
 
 
+_REPO_FILTERS = (
+    ("all", "All"),
+    ("enabled", "Enabled"),
+    ("disabled", "Disabled"),
+    ("no-docs", "No docs"),
+)
+
+
+def _repo_filter_rows(repos: list[dict], repo_filter: str) -> list[dict]:
+    if repo_filter == "enabled":
+        return [repo for repo in repos if repo["state"] == "enabled"]
+    if repo_filter == "disabled":
+        return [repo for repo in repos if repo["state"] == "disabled"]
+    if repo_filter == "no-docs":
+        return [repo for repo in repos if repo.get("has_doc") is False]
+    return repos
+
+
+def _render_repo_filters(active: str) -> str:
+    links = []
+    for value, label in _REPO_FILTERS:
+        href = "/repos" if value == "all" else f"/repos?filter={quote(value, safe='')}"
+        css = "pill on" if value == active else "pill"
+        current = " aria-current='page'" if value == active else ""
+        links.append(
+            f"<a class='{css}' href='{href}'{current} style='display:inline-block'>"
+            f"{label}</a>"
+        )
+    return "<nav class=row aria-label='Repository filters'>" + "".join(links) + "</nav>"
+
+
 def render_repos(
     data: dict,
     *,
@@ -2654,6 +2685,7 @@ def render_repos(
     schedule_repo: str | None = None,
     remove_repo: str | None = None,
     sent: str | None = None,
+    repo_filter: str = "all",
 ) -> bytes:
     """Show local repos and repos reported by other machines.
 
@@ -2662,6 +2694,9 @@ def render_repos(
     `data` comes from `gather_repos()`. Query flags open a panel.
     """
     repos = data["repos"]
+    if repo_filter not in {"all", "enabled", "disabled", "no-docs"}:
+        repo_filter = "all"
+    visible_repos = _repo_filter_rows(repos, repo_filter)
     local_host = data["local_host"]
     body = [f'<header><h1>{icon(REPOS_ICON)}Repos</h1></header>']
 
@@ -2670,7 +2705,12 @@ def render_repos(
 
     add_href = "/repos" if add else "/repos?add=existing"
     add_label = "Close" if add else "Add repo"
-    body.append(f"<div class=row style='margin-bottom:.6rem'><span class=sp></span><a href='{add_href}'>{esc(add_label)}</a></div>")
+    body.append(
+        "<div class='row' style='margin-bottom:.6rem'>"
+        f"{_render_repo_filters(repo_filter)}"
+        "<span class=sp></span>"
+        f"<a href='{add_href}'>{esc(add_label)}</a></div>"
+    )
 
     if add:
         body.append(_render_add_panel(add, repos))
@@ -2686,8 +2726,12 @@ def render_repos(
             "<div class=card><p class=dim>No repos yet. Add one to start scheduling loops.</p>"
             "<a href='/repos?add=existing'>Add your first repo</a></div>"
         )
+    elif not visible_repos:
+        body.append(
+            "<div class=card><p class=dim>No repositories match this filter.</p></div>"
+        )
     else:
-        body.append(_render_repo_table(repos, local_host))
+        body.append(_render_repo_table(visible_repos, local_host))
 
     fleet_error = data.get("fleet_error")
     if fleet_error:
@@ -3603,6 +3647,7 @@ class Handler(BaseHTTPRequestHandler):
                 schedule_repo=(query.get("schedule") or "").strip() or None,
                 remove_repo=(query.get("remove") or "").strip() or None,
                 sent=query.get("sent"),
+                repo_filter=query.get("filter") or "all",
             )
         )
 

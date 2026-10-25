@@ -3755,6 +3755,56 @@ class RepoRenderTests(unittest.TestCase):
         self.assertIn("<span class=pill>disabled</span>", page)
         self.assertIn("no doc (optional)", page)
 
+
+    def test_repo_filters_select_rows_and_keep_actions(self):
+        all_page = serve.render_repos(self._data(), repo_filter="all").decode()
+        self.assertIn("<b>widgets</b>", all_page)
+        self.assertIn("<b>gizmos</b>", all_page)
+        self.assertIn("<b>scratch</b>", all_page)
+        self.assertIn(
+            "<a class='pill on' href='/repos' aria-current='page' "
+            "style='display:inline-block'>All</a>",
+            all_page,
+        )
+
+        enabled_page = serve.render_repos(self._data(), repo_filter="enabled").decode()
+        self.assertIn("href='/repos?filter=enabled' aria-current='page'", enabled_page)
+        self.assertIn("<b>widgets</b>", enabled_page)
+        self.assertNotIn("<b>gizmos</b>", enabled_page)
+        self.assertNotIn("<b>scratch</b>", enabled_page)
+        self.assertIn("action=/schedule/run", enabled_page)
+        self.assertIn("/repos?remove=widgets", enabled_page)
+
+        disabled_page = serve.render_repos(self._data(), repo_filter="disabled").decode()
+        self.assertNotIn("<b>widgets</b>", disabled_page)
+        self.assertIn("<b>gizmos</b>", disabled_page)
+        self.assertIn("<b>scratch</b>", disabled_page)
+        self.assertIn("action=/repos/add", disabled_page)
+        self.assertNotIn("/repos?remove=gizmos", disabled_page)
+
+    def test_no_docs_filter_excludes_unknown_remote_doc_status(self):
+        repos = self._data()["repos"] + [
+            {"repo": "remote", "state": "disabled", "local": False}
+        ]
+
+        page = serve.render_repos(
+            self._data(repos=repos), repo_filter="no-docs"
+        ).decode()
+
+        self.assertIn("<b>scratch</b>", page)
+        self.assertNotIn("<b>widgets</b>", page)
+        self.assertNotIn("<b>gizmos</b>", page)
+        self.assertNotIn("<b>remote</b>", page)
+
+    def test_filter_with_no_matches_shows_no_match_state(self):
+        repos = [{"repo": "widgets", "state": "enabled", "has_doc": True}]
+        page = serve.render_repos(
+            self._data(repos=repos), repo_filter="no-docs"
+        ).decode()
+
+        self.assertIn("No repositories match this filter.", page)
+        self.assertNotIn("<b>widgets</b>", page)
+
     def test_enabled_row_has_run_now_and_remove(self):
         page = serve.render_repos(self._data()).decode()
         self.assertIn("action=/schedule/run", page)

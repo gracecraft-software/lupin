@@ -13,6 +13,7 @@ All notable changes to Lupin. The version has one source:
   version from `pyproject.toml`.
 - `docs/release.md` gives the release steps.
 - The Roadmap board shows stage tabs with counts, like the List view.
+- The Repos table has All, Enabled, Disabled, and No docs filters.
 - The triage skill checks issue details and linked open PRs before it reports
   likely duplicates.
 
