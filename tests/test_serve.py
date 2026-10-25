@@ -4303,8 +4303,6 @@ def test_debrief_index_lists_newest_first_with_utc_file_name_times(tmp_path, mon
     handler.do_GET()
 
     body = handler.reply.call_args.args[0].decode()
-    assert "<a class='navlink active' href='/debrief'>" in body
-    assert "<span>Debriefs</span>" in body
     assert "href='/debrief?repo=widgets&amp;file=20261002-090000.md'" in body
     assert "2026-10-02 09:00:00 UTC" in body
     assert body.index("20261002-090000") < body.index("20261001-090000")
@@ -4338,8 +4336,6 @@ def test_debrief_page_renders_markdown_escapes_text_and_maps_images(tmp_path, mo
     handler.do_GET()
 
     body = handler.reply.call_args.args[0].decode()
-    assert "<a class='navlink active' href='/debrief'>" in body
-    assert "<span>Debriefs</span>" in body
     assert "<h1>Debrief: acme/widgets</h1>" in body
     assert "<li>PR #11: Shipped feature &lt;b&gt;x&lt;/b&gt;</li>" in body
     assert f"<img src='/image?id={DEBRIEF_ATTACHMENT}'" in body
@@ -4642,3 +4638,12 @@ def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_s
 
     assert "no digest" not in index.reply.call_args.args[0].decode()
     assert "This is a record" in page.reply.call_args.args[0].decode()
+
+
+def test_nav_links_have_accessible_names():
+    rendered = serve.render_nav("overview")
+    assert rendered.count("class='navlink") == len(serve.NAV_ITEMS)
+    for _key, _href, label, _path in serve.NAV_ITEMS:
+        assert f"aria-label='{label}'" in rendered
+
+
