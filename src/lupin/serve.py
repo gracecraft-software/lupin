@@ -1315,7 +1315,13 @@ def render_dashboard(state: dict) -> bytes:
         '<div class="card stat">'
         f'<div class="stat-label">{icon("M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3", 13)}Live loops</div>'
         f'<div class="stat-value">{esc(len(loops))}</div>'
-        f'<div class="stat-note">{esc(len(enabled))} repos enabled</div></div>'
+        f'<div class="stat-note">{esc(len(enabled))} repos enabled'
+        + (
+            ". <a href='/repos'>Enable a repo</a> to start loops."
+            if not enabled
+            else ""
+        )
+        + "</div></div>"
     )
     if nxt:
         body.append(
@@ -1374,17 +1380,23 @@ def render_dashboard(state: dict) -> bytes:
     body.append(
         f'<div class="section-head">{icon("M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z", 15)}<h2>Coming up</h2></div>'
     )
-    body.append("<div class='card scroll'><table>")
-    body.append("<tr><th>repository</th><th>next</th><th>at</th><th>last</th></tr>")
-    for t in recurring + oneoffs:
-        when = f"<span data-until='{t['next']:.0f}'></span>" if t["next"] else "<span class=dim>-</span>"
-        at = time.strftime("%a %H:%M:%S %Z", time.localtime(t["next"])) if t["next"] else "-"
-        last = f"<span data-since='{t['last']:.0f}'></span>" if t["last"] else "<span class=dim>never</span>"
+    if recurring or oneoffs:
+        body.append("<div class='card scroll'><table>")
+        body.append("<tr><th>repository</th><th>next</th><th>at</th><th>last</th></tr>")
+        for t in recurring + oneoffs:
+            when = f"<span data-until='{t['next']:.0f}'></span>" if t["next"] else "<span class=dim>-</span>"
+            at = time.strftime("%a %H:%M:%S %Z", time.localtime(t["next"])) if t["next"] else "-"
+            last = f"<span data-since='{t['last']:.0f}'></span>" if t["last"] else "<span class=dim>never</span>"
+            body.append(
+                f"<tr><td>{esc(timer_repository(t['unit']))}</td><td>{when}</td>"
+                f"<td class=dim>{esc(at)}</td><td class=dim>{last}</td></tr>"
+            )
+        body.append("</table></div>")
+    else:
         body.append(
-            f"<tr><td>{esc(timer_repository(t['unit']))}</td><td>{when}</td>"
-            f"<td class=dim>{esc(at)}</td><td class=dim>{last}</td></tr>"
+            "<div class='card dim'>No upcoming runs. "
+            "<a href='/schedule'>Schedule one</a>.</div>"
         )
-    body.append("</table></div>")
 
     # ---- fleet (issue #15) -------------------------------------------
     body.append(
@@ -1396,7 +1408,10 @@ def render_dashboard(state: dict) -> bytes:
     else:
         fleet_machines = state.get("machines", [])
         if not fleet_machines:
-            body.append("<div class='card dim'>No machines registered.</div>")
+            body.append(
+                "<div class='card dim'>No machines registered. "
+                "Run <code>lupin join &lt;redis-host&gt;[:port]</code>.</div>"
+            )
         else:
             body.append("<div class='card scroll'><table>")
             body.append("<tr><th>machine</th><th>state</th><th>version</th><th>heartbeat</th></tr>")

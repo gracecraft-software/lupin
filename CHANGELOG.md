@@ -42,6 +42,7 @@ All notable changes to Lupin. The version has one source:
   is missing or different.
 - "Run now" passes dash-leading notes as one argument, and rejects notes
   with a NUL byte before dispatch.
+- The Overview shows a next step when no runs, machines, or enabled repos exist.
 - Routing and loop profiles block Claude's weekly quota above 90%. A blocked
   route tries only same- or lower-tier models with verified prices no higher
   than the blocked model, then defers with a reason.

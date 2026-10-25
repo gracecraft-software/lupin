@@ -114,6 +114,8 @@ class TimerTests(unittest.TestCase):
             ):
                 page = serve.render_dashboard(state).decode()
 
+        self.assertIn("<th>repository</th>", page)
+        self.assertNotIn("No runs are scheduled.", page)
         self.assertIn("all enabled repos", page)
         self.assertIn("<td>repo-one, repo-two", page)
         run.assert_not_called()
@@ -1382,8 +1384,23 @@ class FleetDashboardRenderTests(unittest.TestCase):
 
     def test_missing_fleet_keys_degrade_to_empty_sections(self):
         page = serve.render_dashboard(dict(self.base_state)).decode()
-        self.assertIn("No machines registered.", page)
+        self.assertIn(
+            "No machines registered. Run <code>lupin join &lt;redis-host&gt;[:port]</code>.",
+            page,
+        )
         self.assertIn("No claimed issues.", page)
+
+    def test_empty_overview_states_show_next_steps(self):
+        page = serve.render_dashboard(dict(self.base_state)).decode()
+        self.assertIn(
+            "No upcoming runs. <a href='/schedule'>Schedule one</a>.",
+            page,
+        )
+        self.assertNotIn("<th>repository</th>", page)
+        self.assertIn(
+            "0 repos enabled. <a href='/repos'>Enable a repo</a> to start loops.",
+            page,
+        )
 
     def test_fleet_error_shown_instead_of_machine_table(self):
         state = dict(self.base_state, fleet_error="machine registry: connection refused")
