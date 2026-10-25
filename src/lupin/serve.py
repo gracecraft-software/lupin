@@ -2153,13 +2153,16 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     if sent:
         body.append(f"<p class=dim>{esc(sent)}</p>")
     body.append(
-        "<div class='card' style='display:flex;align-items:center;gap:1rem'>"
-        f"<span class=dim>Last pulled: {_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}</span>"
-        f"<span class=dim>General scores: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)} ({scored_benchmarks}/{len(benchmark_scores)} scored)</span>"
-        "<span style='flex:1'></span>"
-        "<form method=post action='/model-tiers/refresh'>"
+        "<div class='card model-status'>"
+        f"<span class='dim'>Last pulled: "
+        f"{_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}</span>"
+        f"<span class='dim'>General scores: "
+        f"{_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)} "
+        f"({scored_benchmarks}/{len(benchmark_scores)} scored)</span>"
+        "<span class='model-status-spacer'></span>"
+        "<form class='model-status-action' method=post action='/model-tiers/refresh'>"
         "<button type=submit>Pull models</button></form>"
-        "<form method=post action='/model-tiers/refresh-benchmarks'>"
+        "<form class='model-status-action' method=post action='/model-tiers/refresh-benchmarks'>"
         "<button type=submit>Pull benchmarks</button></form></div>"
     )
     body.extend([
@@ -2210,7 +2213,18 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
             models, benchmark_categories, scores_by_model, performance, notes_by_model
         ),
     ])
-    return page("Model tiers", "".join(body), active="models")
+    extra_css = """
+.model-status{display:flex;align-items:center;gap:1rem}
+.model-status-spacer{flex:1}
+@media(max-width:760px){
+.model-status{display:grid;gap:.75rem}
+.model-status-spacer{display:none}
+.model-status-action{margin:0}
+.model-status-action button{width:100%;white-space:nowrap}
+}
+"""
+
+    return page("Model tiers", "".join(body), extra_css=extra_css, active="models")
 
 
 def _heartbeat_epoch(stamp: str | None) -> float | None:

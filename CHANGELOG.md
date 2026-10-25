@@ -35,6 +35,7 @@ All notable changes to Lupin. The version has one source:
   priority label. `--json` still lists each issue. The triage and
   delegation-loop skills name skills in one form, and triage defines the
   `Duplicates` reply.
+- On phones, the Models status summaries and pull buttons use one column.
 
 ### Fixed
 
