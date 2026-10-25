@@ -48,6 +48,7 @@ All notable changes to Lupin. The version has one source:
 - OMP prompt jobs do not wait for caller stdin to close.
 - Claim reads use Redis `TTL` for the remaining time.
 - `lupin place` reports quota deferrals when no reset time is available.
+- The Models page shows the model-tier file path that Lupin loads.
 
 ## 0.1.0
 

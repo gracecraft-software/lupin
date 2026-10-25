@@ -147,9 +147,7 @@ def _model_tiers_path() -> str:
     return tiers_config.path(MODEL_TIERS_PATH)
 
 def _model_tiers_source_label() -> str:
-    if tiers_config.SETTING in os.environ:
-        return os.path.basename(_model_tiers_path())
-    return "modules/ai/model-tiers.json"
+    return _model_tiers_path()
 
 # --------------------------------------------------------------------------
 # running read-only probes

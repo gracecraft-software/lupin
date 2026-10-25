@@ -700,7 +700,11 @@ class ModelTierTests(unittest.TestCase):
 
     def test_shipped_model_tiers_file_renders_every_category(self):
         real_path = str(resources.files("lupin").joinpath("model-tiers.json"))
-        with mock.patch.object(serve, "MODEL_TIERS_PATH", real_path):
+        with (
+            mock.patch.object(serve, "MODEL_TIERS_PATH", real_path),
+            mock.patch.dict(os.environ) as environment,
+        ):
+            environment.pop(serve.tiers_config.SETTING, None)
             rows = serve.model_tiers()
             page = serve.render_model_tiers().decode()
 
@@ -711,6 +715,9 @@ class ModelTierTests(unittest.TestCase):
         )
         for category in categories:
             self.assertIn(f"<h3>{category}</h3>", page)
+
+        self.assertIn(f"<code>{serve.esc(real_path)}</code>", page)
+        self.assertNotIn("modules/ai/model-tiers.json", page)
 
     def test_custom_model_tiers_path_is_used_and_shown(self):
         self.write_tiers({
@@ -724,8 +731,8 @@ class ModelTierTests(unittest.TestCase):
         ):
             page = serve.render_model_tiers().decode()
 
-        self.assertIn("<code>model-tiers.json</code>", page)
-        self.assertNotIn(self.tiers_path, page)
+        self.assertIn(f"<code>{serve.esc(self.tiers_path)}</code>", page)
+        self.assertNotIn("modules/ai/model-tiers.json", page)
         self.assertIn("opencode-go/custom", page)
 
     def test_model_tiers_route_and_dashboard_link(self):
