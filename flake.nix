@@ -17,16 +17,16 @@
       mkLupin =
         pkgs:
         withOmp:
-        pkgs.python3Packages.buildPythonApplication {
+        pkgs.python315Packages.buildPythonApplication {
           pname = "lupin";
           # `pyproject.toml` is the only place the version is set.
           version = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project.version;
           pyproject = true;
           src = self;
-          build-system = [ pkgs.python3Packages.setuptools ];
-          # python3Packages.redis is the `redis` backend's only runtime
+          build-system = [ pkgs.python315Packages.setuptools ];
+          # `python315Packages.redis` is the `redis` backend's only runtime
           # dependency (issue #210).
-          dependencies = [ pkgs.python3Packages.redis ];
+          dependencies = [ pkgs.python315Packages.redis ];
           doCheck = false;
           # `lupin serve` shells out to these fixed read-only probes and
           # runs them from PATH, so they belong on the wrapper's PATH.
@@ -81,7 +81,7 @@
         {
           default = pkgs.mkShell {
             packages = [
-              (pkgs.python3.withPackages (pythonPackages: [
+              (pkgs.python315.withPackages (pythonPackages: [
                 pythonPackages.pytest
                 pythonPackages.redis
               ]))
@@ -106,7 +106,7 @@
             src = self;
             package = self.packages.${system}.default;
             nativeBuildInputs = [
-              (pkgs.python3.withPackages (pythonPackages: [
+              (pkgs.python315.withPackages (pythonPackages: [
                 pythonPackages.pytest
                 pythonPackages.redis
               ]))

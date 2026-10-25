@@ -16,7 +16,7 @@ Lupin runs coding-agent loops on a group of machines (a fleet). It has 4 jobs:
 
 | Item | Necessary for | Notes |
 | --- | --- | --- |
-| Nix with flakes | All | The supported way to build Lupin. Nix supplies Python 3.11 or later. |
+| Nix with flakes | All | The supported way to build Lupin. Nix supplies Python 3.15; `pyproject.toml` requires Python 3.11 or later. |
 | Redis | Fleet commands, `redis` slot backend, dashboard data | Not necessary for `route` or the `local` slot backend. |
 | `gh` (GitHub CLI), `git` | `gh`: claims, roadmap, dashboard. `git`: loops, roadmap. | The Nix package adds both to `PATH`. |
 | systemd (Linux) | Loop workers, timers | Not available on macOS. |

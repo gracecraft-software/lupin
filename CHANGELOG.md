@@ -21,6 +21,7 @@ All notable changes to Lupin. The version has one source:
 - `lupin run` starts from `origin/HEAD`, or else `origin/main`. It no longer
   checks `origin/release/next` or `origin/master`, and CI no longer lists
   `release/next`.
+- The Nix package, dev shell, and flake test environment use Python 3.15.
 
 ### Fixed
 
