@@ -328,6 +328,20 @@ def quota_duration(limit: dict, window: dict) -> QuotaDuration:
         return QuotaDuration.MONTHLY
     return QuotaDuration.OTHER
 
+def _claude_identity() -> dict | None:
+    """Read Claude's OAuth account email for in-memory matching."""
+    try:
+        with open(CLAUDE_CREDENTIALS_FILE, encoding="utf-8") as credentials_file:
+            credentials = json.load(credentials_file)
+    except (OSError, ValueError):
+        return None
+    try:
+        email = credentials["oauthAccount"]["emailAddress"]
+    except (KeyError, TypeError):
+        return None
+    return {"email": email.strip().lower()} if isinstance(email, str) and email.strip() else None
+
+
 def _claude_token() -> str | None:
     """The OAuth access token, or None when the file or token is missing.
 
@@ -381,6 +395,7 @@ def claude_oauth_quota() -> list[dict]:
             rows.append({
                 "provider": "claude",
                 "duration": duration,
+                "label": duration.label,
                 "used_pct": min(100, max(0, used)),
                 "resets_at": quota_reset_timestamp(limit.get("resets_at")),
                 "generated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
@@ -481,7 +496,38 @@ def opencode_go_quota() -> list[dict]:
 def add_quota_fallbacks(rows: list[dict]) -> list[dict]:
     if not any(row.get("provider") == "opencode-go" and "used_pct" in row for row in rows):
         rows.extend(opencode_go_quota())
-    rows.extend(claude_oauth_quota())
+    existing = {
+        (row.get("provider"), row.get("account"), row.get("duration"))
+        for row in rows
+        if row.get("duration") is not None
+    }
+    fallback_rows = claude_oauth_quota()
+    identity = _claude_identity()
+    report_by_identity = {}
+    for row in rows:
+        if row.get("provider") != "claude":
+            continue
+        metadata = row.get("_metadata")
+        if not isinstance(metadata, dict):
+            continue
+        report_by_identity.setdefault(
+            str(metadata.get("email") or "").strip().lower(),
+            set(),
+        ).add(row.get("account"))
+    if identity is not None:
+        labels = report_by_identity.get(identity["email"], set())
+        if len(labels) == 1 and None not in labels:
+            account = next(iter(labels))
+            for row in fallback_rows:
+                if row.get("provider") == "claude":
+                    row["account"] = account
+    rows.extend(
+        row for row in fallback_rows
+        if row.get("duration") is None
+        or (row.get("provider"), row.get("account"), row.get("duration")) not in existing
+    )
+    for row in rows:
+        row.pop("_metadata", None)
     return rows
 
 
@@ -578,6 +624,7 @@ def quota_usage() -> list[dict]:
         who.update(_reset_credits(report))
         limits = report.get("limits") or []
         if not limits:
+            who["_metadata"] = report.get("metadata")
             for note in report.get("notes") or ["no quota data reported"]:
                 rows.append({"provider": provider, "note": note, "generated_at": generated_at, **who})
             continue
@@ -585,6 +632,9 @@ def quota_usage() -> list[dict]:
             amount = limit.get("amount") or {}
             window = limit.get("window") or {}
             used_fraction = amount.get("usedFraction")
+            metadata = report.get("metadata")
+            if isinstance(metadata, dict):
+                who["_metadata"] = metadata
             rows.append({
                 "provider": provider,
                 "duration": quota_duration(limit, window),
@@ -607,17 +657,12 @@ def quota_source_label(provider: str) -> str:
 
 
 def snapshot() -> dict[str, dict]:
-    """One number per provider: `{provider: {pct_left, resets_at, source}}`.
-    When `pct_left` is None the entry also has `note`, the reason.
+    """One primary percentage plus all windows per provider.
 
     `quota_usage()` can return several rows per provider -- one per
-    window (5 hours, 7 days, 30 days). This picks the 5-hour row when
-    there is one (the window every reader tags "primary"/"session"), since
-    that is the window that actually blocks the next request; otherwise it
-    falls back to the first row for that provider. A provider with no
-    usable percentage (an error or a "no data" note) still gets an entry,
-    with `pct_left`/`resets_at` as `None` -- callers (`machines.py`'s
-    heartbeat, eventually `place`) decide what to do with missing data.
+    window (5 hours, 7 days, 30 days). `pct_left` and `resets_at` keep the
+    existing 5-hour-first summary. `windows` lists each window for readers
+    that need to show long-term limits too.
 
     With more than one account, this picks one row for each account as
     above. Then it keeps the account with the most quota left on its
@@ -674,10 +719,22 @@ def snapshot() -> dict[str, dict]:
     for provider, row in chosen.items():
         used = row.get("used_pct")
         pct_left = None if not isinstance(used, (int, float)) else max(0.0, 100 - used)
+        key = best[provider]
+        windows = []
+        for window in account_rows[key]:
+            if window.get("duration") is None:
+                continue
+            used = window.get("used_pct")
+            windows.append({
+                "label": window.get("label"),
+                "pct_left": None if not isinstance(used, (int, float)) else max(0.0, 100 - used),
+                "resets_at": window.get("resets_at"),
+            })
         entry = {
             "pct_left": pct_left,
             "resets_at": row.get("resets_at"),
             "source": quota_source_label(provider),
+            "windows": windows,
         }
         if pct_left is None:
             entry["note"] = row.get("note")

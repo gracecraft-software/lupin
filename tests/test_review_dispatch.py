@@ -64,6 +64,31 @@ class MainCliTests(unittest.TestCase):
         self.assertIn("model", payload)
         self.assertIn("plan", payload)
 
+    def test_cli_excludes_providers_from_review_routing(self):
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with mock.patch.object(
+            review_dispatch.route.quota_mod, "quota_usage", return_value=[]
+        ):
+            with contextlib.redirect_stdout(buf):
+                rc = review_dispatch.main([
+                    "--category",
+                    "coding",
+                    "--size",
+                    "size-m",
+                    "--exclude-provider",
+                    "claude",
+                    "--exclude-provider",
+                    "opencode-go",
+                ])
+
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["model"], "openai-codex/gpt-6-sol")
+        self.assertEqual(payload["plan"], "same_unit")
+
     def test_unknown_category_prints_one_line_and_exits_2(self):
         import contextlib
         import io

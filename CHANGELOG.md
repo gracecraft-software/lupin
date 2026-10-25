@@ -7,6 +7,9 @@ All notable changes to Lupin. The version has one source:
 
 ### Added
 
+- `route`, `place`, and `review-route` accept repeated `--exclude-provider`
+  options. `place` shows every quota window, including the weekly limit.
+
 - `lupin logs` shows events from a loop run. Lupin keeps up to 20 logs per
   repo and removes logs older than 30 days.
 - `lupin --version` prints the package version. The flake reads the same
@@ -23,6 +26,8 @@ All notable changes to Lupin. The version has one source:
   `release/next`.
 
 ### Fixed
+- `route --no-bmo` stays off BMO models after exclusions or quota fallback.
+  Claude quota windows are deduplicated against OMP data and labeled.
 
 - The Roadmap page family uses one set of stage words (In progress, Ready,
   Later, Blocked) on the board, the list, the detail panel and the queue

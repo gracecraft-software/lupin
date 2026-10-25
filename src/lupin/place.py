@@ -247,19 +247,21 @@ def _quota_for_provider(records: list[dict], provider: str) -> dict | None:
     """One quota reading to show in the header -- #2's design note says
     quota is "usually per-account, shared by every machine on that
     account", so one line is enough unless machines disagree (not handled
-    here; see this module's docstring). Prefers a record with a real
-    percentage over one with `pct_left: None` (unavailable), but returns
-    whatever is there rather than nothing.
+    here; see this module's docstring). Prefer full windows, then a real
+    percentage, then an unavailable entry.
     """
     fallback = None
+    summary = None
     for record in records:
         entry = (record.get("quota") or {}).get(provider)
         if entry is None:
             continue
-        if entry.get("pct_left") is not None:
-            return entry
         fallback = fallback or entry
-    return fallback
+        if entry.get("windows"):
+            return entry
+        if entry.get("pct_left") is not None:
+            summary = summary or entry
+    return summary or fallback
 
 
 def _filter_candidates(
@@ -331,10 +333,18 @@ def _filter_candidates(
     return skipped, candidates, pick
 
 
-def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
+def place(
+    task: str,
+    connection: dict,
+    *,
+    tiers: dict | None = None,
+    excluded_providers: list[str] | tuple[str, ...] | set[str] | frozenset[str] = (),
+) -> dict:
     """Classify, route, and pick a machine for `task`. Raises
     `CoordinatorUnreachable` if the fleet registry can't be reached (same
     exception `machines.machines()` raises).
+
+    `excluded_providers` prevents routing to those providers.
 
     Quota pacing is `route()`'s job now (issue #36 -- every provider is one
     account shared by the whole fleet, so it belongs with the model choice,
@@ -349,7 +359,12 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
     """
     issue, task_label = _resolve_task(task, connection)
     category, size = classify_mod.classify(issue)
-    choice = route_mod.route(category, size, tiers=tiers)
+    choice = route_mod.route(
+        category,
+        size,
+        tiers=tiers,
+        excluded_providers=excluded_providers,
+    )
     model, effort = choice["model"], choice["effort"]
     provider = provider_for_model(model)
     wait_seconds = choice.get("wait_seconds")

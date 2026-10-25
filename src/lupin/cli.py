@@ -82,6 +82,13 @@ def _route_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--primary-effort", default=None)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--exclude-provider",
+        action="append",
+        default=[],
+        metavar="PROVIDER",
+        help="provider to avoid (repeat for more than one)",
+    )
 
 
 def _classify_args(parser: argparse.ArgumentParser) -> None:
@@ -422,6 +429,13 @@ def _review_route_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--primary-effort", default=None)
     parser.add_argument(
+        "--exclude-provider",
+        action="append",
+        default=[],
+        metavar="PROVIDER",
+        help="provider to avoid (repeat for more than one)",
+    )
+    parser.add_argument(
         "--prefetch",
         default=None,
         help="comma-separated issue/PR numbers to fetch instead of routing",
@@ -434,7 +448,6 @@ def _review_route_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="with --prefetch: print the trimmed keyed object instead of markdown",
     )
-
 
 def _fleet_connection_args(parser: argparse.ArgumentParser) -> None:
     """Redis location overrides for `heartbeat`/`drain`/`undrain`/`machines`.
@@ -475,6 +488,13 @@ def _place_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("task", help="a GitHub issue number (e.g. 418 or #418) or free text")
     parser.add_argument("--explain", action="store_true", help="show every candidate machine and why")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--exclude-provider",
+        action="append",
+        default=[],
+        metavar="PROVIDER",
+        help="provider to avoid (repeat for more than one)",
+    )
     _fleet_connection_args(parser)
 
 
@@ -759,6 +779,7 @@ def _cmd_route(args: argparse.Namespace) -> int:
             args.size,
             bmo_available=args.bmo_available,
             primary_effort=args.primary_effort,
+            excluded_providers=args.exclude_provider,
         )
     except route_mod.RouteInputError as err:
         print(f"lupin route: {err}", file=sys.stderr)
@@ -1234,7 +1255,18 @@ def _format_place_explain(result: dict) -> str:
         f" → {result['model']} {result['effort']} ({result['provider']})"
     ]
     quota = result["quota"]
-    if quota and quota.get("pct_left") is not None:
+    if quota and quota.get("windows"):
+        lines.append(f"{result['provider']} quota:")
+        for window in quota["windows"]:
+            label = window.get("label") or "quota window"
+            pct_left = window.get("pct_left")
+            details = "unknown" if pct_left is None else f"{pct_left:.0f}% left"
+            resets_at = window.get("resets_at")
+            if resets_at:
+                resets_in = place_mod.format_duration(resets_at / 1000 - time.time())
+                details += f", resets in {resets_in}"
+            lines.append(f"  {label}: {details}")
+    elif quota and quota.get("pct_left") is not None:
         pct = f"{quota['pct_left']:.0f}%"
         resets_at = quota.get("resets_at")
         if resets_at:
@@ -1276,13 +1308,20 @@ def _format_place_explain(result: dict) -> str:
 
 def _cmd_place(args: argparse.Namespace) -> int:
     try:
-        result = place_mod.place(args.task, _fleet_connection(args))
+        result = place_mod.place(
+            args.task,
+            _fleet_connection(args),
+            excluded_providers=args.exclude_provider,
+        )
     except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, "the placement", fleet=True)
         return 3
     except place_mod.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
         return 3
+    except route_mod.RouteInputError as exc:
+        print(f"lupin place: {exc}", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(result))
         return 0 if result["pick"] else 2

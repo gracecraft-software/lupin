@@ -154,18 +154,21 @@ Examples
 
 **place**
 ```
-lupin place <task> [--explain] [--json]
+lupin place <task> [--exclude-provider PROVIDER ...] [--explain] [--json]
 
-Pick a machine for a task. Classifies the task and picks its model with the
-existing `lupin route <category> <size>` logic, then compares quota left,
-time to reset, and free slots across the machines that can run that model.
+Pick a model and a machine for a task. It classifies the task and routes a
+model, then ranks machines that can run it. It ranks by machine state, quest
+focus, free slots, and heartbeat age. Provider quota is shared, so it does not
+rank machines by quota.
 <task> is an issue number (#418) or a short description.
 
-  --explain    show the scores behind the pick
+  --exclude-provider P  avoid a provider; repeat to avoid more than one
+  --explain             show the quota windows and why each machine lost
+  --json                include quota.windows in the result
 
 Examples
   lupin place "#418"
-  lupin place "migrate session store" --explain
+  lupin place "migrate session store" --exclude-provider claude --explain
 ```
 
 **pause / resume**
@@ -306,25 +309,18 @@ Cycle: `error: dependency cycle #431 -> #440 -> #431. Fix the links in the track
 Empty: `No ready tasks in api-gateway. 3 are claimed by other loops, 1 is blocked.`
 Empty everywhere: `No ready tasks in any repo. Nothing to run.`
 
-### `lupin place "#418"`
-```
-#418 retry backoff · type: code edit, small
+### `lupin place "#418" --explain`
 
-Run on  claude @ mac-studio
-Quest   session-rewrite (focus: mac-studio), unblocks #431
-Why     62% quota left, resets in 3h 10m · 2 of 4 slots free · best fit for small edits
+The first lines show the selected model and every quota window:
+```
+#418 retry backoff · code edit, small → opus high (claude)
+claude quota:
+  5 Hour limit: 62% left, resets in 3h 10m
+  Weekly limit: 9% left, resets in 4d
+```
 
-Next    lupin run api-gateway --loop 1
-```
-With `--explain`:
-```
-provider      quota   resets    fit   slots   result
-claude        62%     3h 10m    high  2/4     pick
-openai        18%     41m       high  3/3     low quota
-opencode-go   90%     5d        med   1/2     lower fit
-```
-No fit: `No provider can take #418 now. claude resets in 3h 10m. Run: lupin once +3h api-gateway`
-All machines full: `All slots are in use on 3 machines. Next slot frees in about 8m.`
+The rest lists candidate machines and why each one won or lost. The JSON
+result includes the same windows under `quota.windows`.
 
 ### `lupin quest`
 ```

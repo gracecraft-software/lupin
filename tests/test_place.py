@@ -117,6 +117,24 @@ def test_format_duration():
     assert place.format_duration(-5) == "now"
 
 
+def test_quota_for_provider_prefers_full_windows_to_a_legacy_summary():
+    windows = {
+        "pct_left": 9,
+        "resets_at": None,
+        "source": "current",
+        "windows": [
+            {"label": "5 Hour limit", "pct_left": 80, "resets_at": None},
+            {"label": "Weekly limit", "pct_left": 9, "resets_at": None},
+        ],
+    }
+    records = [
+        {"quota": {"claude": {"pct_left": 60, "resets_at": 1, "source": "older"}}},
+        {"quota": {"claude": windows}},
+    ]
+
+    assert place._quota_for_provider(records, "claude") == windows
+
+
 def test_resolve_task_free_text_is_classified_as_is():
     issue, label = place._resolve_task("retry backoff")
     assert issue == {"title": "retry backoff"}
@@ -595,6 +613,71 @@ def test_cli_place_explain_lists_candidates_and_skip_footer(
     assert "different provider" in captured.out
 
 
+def test_place_explain_shows_each_quota_window(
+    redis_port, flush_redis, tmp_path, capsys, clean_fleet_env
+):
+    _write_machine(
+        redis_port,
+        "mac-studio",
+        quota={
+            "claude": {
+                "pct_left": 98,
+                "resets_at": 1_800_000_000_000,
+                "source": "test",
+                "windows": [
+                    {"label": "5 Hour limit", "pct_left": 98, "resets_at": 1_800_000_000_000},
+                    {"label": "Weekly limit", "pct_left": 9, "resets_at": None},
+                ],
+            }
+        },
+    )
+    common = [
+        "--redis-host", "127.0.0.1", "--redis-port", str(redis_port),
+        "--config-path", str(tmp_path / "fleet.json"),
+    ]
+
+    code = cli.main(["place", "retry backoff", "--explain", *common])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "5 Hour limit: 98% left" in captured.out
+    assert "Weekly limit: 9% left" in captured.out
+
+
+def test_cli_place_excludes_claude_and_opencode_go(
+    redis_port, flush_redis, tmp_path, capsys, clean_fleet_env, monkeypatch
+):
+    monkeypatch.setattr(
+        place.classify_mod, "classify", lambda *args, **kwargs: ("coding", "size-m")
+    )
+    _write_machine(
+        redis_port,
+        "openai-box",
+        quota={"openai": {"pct_left": 80, "resets_at": None, "source": "test"}},
+    )
+    common = [
+        "--redis-host", "127.0.0.1", "--redis-port", str(redis_port),
+        "--config-path", str(tmp_path / "fleet.json"),
+    ]
+
+    code = cli.main([
+        "place",
+        "fix the retry backoff",
+        "--exclude-provider",
+        "claude",
+        "--exclude-provider",
+        "opencode-go",
+        "--json",
+        *common,
+    ])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["model"] == "openai-codex/gpt-6-sol"
+    assert payload["provider"] == "openai"
+    assert payload["pick"] == "openai-box"
+
+
 def test_cli_place_explain_names_no_key_and_read_failed_apart(
     redis_port, flush_redis, tmp_path, capsys, clean_fleet_env, monkeypatch
 ):
@@ -662,6 +745,40 @@ def test_cli_place_json_no_pick_exits_2(redis_port, flush_redis, tmp_path, capsy
 
     assert code == 2
     assert json.loads(captured.out)["pick"] is None
+
+
+def test_place_json_includes_all_quota_windows(
+    redis_port, flush_redis, tmp_path, capsys, clean_fleet_env
+):
+    _write_machine(
+        redis_port,
+        "mac-studio",
+        quota={
+            "claude": {
+                "pct_left": 98,
+                "resets_at": 1_800_000_000_000,
+                "source": "test",
+                "windows": [
+                    {"label": "5 Hour limit", "pct_left": 98, "resets_at": 1_800_000_000_000},
+                    {"label": "Weekly limit", "pct_left": 9, "resets_at": None},
+                ],
+            }
+        },
+    )
+    common = [
+        "--redis-host", "127.0.0.1", "--redis-port", str(redis_port),
+        "--config-path", str(tmp_path / "fleet.json"),
+    ]
+
+    code = cli.main(["place", "retry backoff", "--json", *common])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["quota"]["windows"][1] == {
+        "label": "Weekly limit",
+        "pct_left": 9,
+        "resets_at": None,
+    }
 
 
 def test_cli_place_unreachable_redis_exits_3(closed_port, tmp_path, capsys, clean_fleet_env):

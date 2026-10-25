@@ -105,7 +105,15 @@ online/offline.
   "slots": {"bmo": {"used": 1, "max": 1}},
   "providers": ["claude", "openai"],
   "quota": {
-    "claude": {"pct_left": 42, "resets_at": "2026-10-05T18:00:00Z"}
+    "claude": {
+      "pct_left": 42,
+      "resets_at": 1791223200000,
+      "source": "Anthropic OAuth usage API",
+      "windows": [
+        {"label": "5 Hour limit", "pct_left": 42, "resets_at": 1791223200000},
+        {"label": "Weekly limit", "pct_left": 9, "resets_at": null}
+      ]
+    }
   },
   "loops": [{
     "repo": "lupin",
@@ -122,6 +130,11 @@ online/offline.
   "actions": ["loop.peek", "loop.run", "loop.run-all", "loop.state", "loop.stop", "schedule.pause", "schedule.resume", "schedule.set", "schedule.show"]
 }
 ```
+
+`quota` keeps the 5-hour-first `pct_left` summary. Each provider entry also
+has `windows`, one row per quota window. Each row has a label, percent left,
+and reset time in Unix milliseconds. `place --explain` shows each row;
+`place --json` returns them under `quota.windows`.
 
 Each `loops` entry reports Herdr's agent state and workspace IDs. `since`
 is an ISO 8601 UTC time. The heartbeat does not infer state from pane text.

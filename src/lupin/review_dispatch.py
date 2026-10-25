@@ -65,6 +65,7 @@ def decide(
     bmo_available: bool = True,
     primary_effort: str | None = None,
     mode: str = "same-unit",
+    excluded_providers: list[str] | tuple[str, ...] = (),
 ) -> dict:
     """Route a (category, size) pair and attach its dispatch plan."""
     # `route.route()` reads the configured model-tier file.
@@ -73,9 +74,9 @@ def decide(
         size,
         bmo_available=bmo_available,
         primary_effort=primary_effort,
+        excluded_providers=excluded_providers,
     )
     return {**choice, "plan": dispatch_plan(choice["model"], mode=mode)}
-
 
 def _run_gh_json(args: list[str], *, repo: str | None = None, timeout: int = 60):
     """Run `gh <args> --json ...`, return (data, error).
@@ -261,6 +262,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--primary-effort", default=None)
     parser.add_argument(
+        "--exclude-provider",
+        action="append",
+        default=[],
+        metavar="PROVIDER",
+        help="provider to avoid (repeat for more than one)",
+    )
+    parser.add_argument(
         "--prefetch",
         default=None,
         help="comma-separated issue/PR numbers to fetch instead of routing",
@@ -315,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
             bmo_available=not args.bmo_unavailable,
             primary_effort=args.primary_effort,
             mode=args.mode,
+            excluded_providers=args.exclude_provider,
         )
     except route.RouteInputError as err:
         print(f"lupin review-route: {err}", file=sys.stderr)

@@ -46,6 +46,25 @@ def test_help_is_user_facing(capsys):
     assert "size" in route_help
 
 
+def test_route_command_excludes_multiple_providers(monkeypatch, capsys):
+    monkeypatch.setattr(cli.route_mod.quota_mod, "quota_usage", lambda: [])
+
+    code = cli.main([
+        "route",
+        "coding",
+        "size-m",
+        "--exclude-provider",
+        "claude",
+        "--exclude-provider",
+        "opencode-go",
+        "--json",
+    ])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["model"] == "openai-codex/gpt-6-sol"
+
+
 def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     monkeypatch, tmp_path, capsys, make_checkout
 ):

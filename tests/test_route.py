@@ -250,6 +250,30 @@ class RouteTests(unittest.TestCase):
 
         self.assertEqual(result, {"model": "sonnet", "effort": "high"})
 
+    def test_bmo_timeout_does_not_return_bmo_after_provider_exclusions(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier0": [{"model": "bmo:qwen3.8-flash-next", "effort": "low"}],
+                    "tier1": [
+                        {"model": "sonnet", "effort": "medium"},
+                        {"model": "opencode-go/qwen3.8-max", "effort": "medium"},
+                        {"model": "openai/gpt-5", "effort": "medium"},
+                    ],
+                }
+            }
+        }
+        with self.assertRaisesRegex(route.RouteInputError, "no model"):
+            route.route(
+                "coding",
+                "size-xs",
+                bmo_available=False,
+                tiers=tiers,
+                quota_rows=[],
+                excluded_providers=["claude", "opencode-go", "openai"],
+            )
+
+
     def test_high_effort_primary_does_not_escalate_the_review(self):
         # The primary pass already ran at "high". The review still gets
         # tier1's base entry (medium), not the high-effort entry -- it
@@ -281,6 +305,46 @@ class RouteTests(unittest.TestCase):
         result = route.route("coding", "size-m", quota_rows=[])
 
         self.assertEqual(result, {"model": "opencode-go/glm-5.3", "effort": "high"})
+
+    def test_excluded_providers_select_a_remaining_model(self):
+        result = route.route(
+            "coding",
+            "size-m",
+            excluded_providers={"claude", "opencode-go"},
+            quota_rows=[],
+        )
+
+        self.assertEqual(result, {"model": "openai-codex/gpt-6-sol", "effort": "medium"})
+
+    def test_exclusions_use_lower_tiers_but_never_higher_tiers(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier0": [{"model": "openai-codex/gpt-6-sol", "effort": "low"}],
+                    "tier1": [{"model": "sonnet", "effort": "medium"}],
+                    "tier2": [{"model": "openai-codex/gpt-6.1-sol", "effort": "high"}],
+                }
+            }
+        }
+        result = route.route(
+            "coding", "size-m", tiers=tiers, excluded_providers={"claude"}, quota_rows=[]
+        )
+
+        self.assertEqual(result, {"model": "openai-codex/gpt-6-sol", "effort": "low"})
+
+    def test_excluding_every_model_at_or_below_the_tier_fails(self):
+        tiers = {"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "medium"}]}}}
+
+        with self.assertRaisesRegex(route.RouteInputError, "no model .* remains"):
+            route.route(
+                "coding", "size-m", tiers=tiers, excluded_providers={"claude"}, quota_rows=[]
+            )
+
+    def test_unknown_excluded_provider_is_rejected(self):
+        with self.assertRaisesRegex(route.RouteInputError, "unknown excluded provider"):
+            route.route(
+                "coding", "size-m", tiers=_TIERS, excluded_providers={"claudee"}, quota_rows=[]
+            )
 
 
 class ProviderForModelTests(unittest.TestCase):
@@ -393,6 +457,30 @@ class RoutePacingTests(unittest.TestCase):
         self.assertEqual(result["model"], "opus")
         self.assertNotIn("downgraded_from", result)
         self.assertIsNotNone(result["wait_seconds"])
+
+    def test_quota_fallback_skips_excluded_providers(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [
+                        {"model": "sonnet", "effort": "medium"},
+                        {"model": "opencode-go/glm-5.3", "effort": "high"},
+                        {"model": "openai-codex/gpt-6-sol", "effort": "medium"},
+                    ]
+                }
+            }
+        }
+        rows = [self._row("claude", 100, 10 * HOUR_MS)]
+        result = _route_with_prices(
+            "coding",
+            "size-m",
+            tiers=tiers,
+            quota_rows=rows,
+            excluded_providers={"opencode-go"},
+        )
+
+        self.assertEqual(result["model"], "openai-codex/gpt-6-sol")
+        self.assertEqual(result["downgraded_from"], {"model": "sonnet", "effort": "medium"})
 
     def test_blocked_tier1_does_not_fall_back_to_a_tier2_on_the_same_blocked_account(self):
         # The bug this issue fixes: coding's tier1 (sonnet) and tier2 (opus)

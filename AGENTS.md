@@ -20,13 +20,16 @@ Run `lupin --help` for the full list.
 ## Commands
 
 ```
-lupin route <category> <size> [--no-bmo] [--primary-effort E] [--json]
+lupin route <category> <size> [--no-bmo] [--primary-effort E] \
+  [--exclude-provider PROVIDER ...] [--json]
 lupin classify --issue-json FILE [--diff-stat FILE] [--json]
 lupin fetch-models [--snapshot-file FILE] [--no-write] [--json]
 lupin fetch-benchmarks [--force] [--json]
 lupin quota [--json]
-lupin review-route (--category C --size S | --issue-json FILE) [--mode M]
+lupin review-route (--category C --size S | --issue-json FILE) [--mode M] \
+  [--exclude-provider PROVIDER ...]
 lupin review-route --prefetch N[,N...] [--repo OWNER/REPO] [--json]
+lupin place <task> [--exclude-provider PROVIDER ...] [--explain] [--json]
 lupin pr-status [--repo OWNER/REPO] [--json] [--full]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
 lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command>
@@ -59,12 +62,17 @@ lupin resume [--machine M | --all] [--json]
 
 `route` and `classify` print a plain result by default (`model effort`, or
 `category size`). A blocked route tries the other models in its tier, then
-lower tiers. It does not use a higher tier to avoid a quota wait. If quota
-blocks every allowed model, `route` prints a deferral reason and wait time
-instead of a model. Add `--json` for a JSON object; a deferred route includes
-`reason` and `wait_seconds`. If the category or size is not known, `route`
-and `review-route` print one line to stderr. The line lists valid values.
-The exit code is 2.
+lower tiers. It does not use a higher tier to avoid a quota wait. Repeat
+`--exclude-provider PROVIDER` on `route`, `review-route`, or `place` to skip
+those providers from the selected tier and lower tiers. The route never
+upgrades to a higher tier to find an allowed provider. An unknown provider
+prints one line to stderr and exits 2. If quota blocks every allowed model,
+`route` prints a deferral reason and wait time instead of a model. Add `--json`
+for a JSON object; a deferred route includes `reason` and `wait_seconds`.
+`place --explain` shows each quota window. `place --json` includes those rows
+in `quota.windows`; each has a label, the percent left, and its reset time.
+If the category or size is not known, `route` and `review-route` print one line
+to stderr. The line lists valid values. The exit code is 2.
 
 `ledger append` stores an event in Redis, with the time and host. Repeat
 `--child` for each split issue. Repeat a digest option to add more items.
