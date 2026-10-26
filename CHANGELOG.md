@@ -7,6 +7,8 @@ All notable changes to Lupin. The version has one source:
 
 ### Added
 
+- The Overview shows live-loop state, cached quota status, and recent Lupin
+  updates.
 - `lupin logs` shows events from a loop run. Lupin keeps up to 20 logs per
   repo and removes logs older than 30 days.
 - `lupin --version` prints the package version. The flake reads the same
@@ -35,6 +37,9 @@ All notable changes to Lupin. The version has one source:
   priority label. `--json` still lists each issue. The triage and
   delegation-loop skills name skills in one form, and triage defines the
   `Duplicates` reply.
+
+- The Overview marks recent updates unavailable when a 256-event page leaves
+  older events unread and fewer than six visible updates.
 
 ### Fixed
 

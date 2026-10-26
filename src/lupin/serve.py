@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, quote, urlparse, urlsplit
 import redis
 
 from . import benchmark_catalog, benchmark_fetch, claims, commands, debrief, digest, loop_runtime, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
+from . import ledger
 from . import model_tiers as tiers_config
 from . import usage_cache
 from .slots import CoordinatorUnreachable
@@ -786,6 +787,148 @@ def gather_loops(connection: dict) -> dict:
     }
 
 
+def _recent_updates(
+    repositories: list[dict],
+    enabled: list[str],
+    connection: dict,
+) -> tuple[list[dict], bool]:
+    """Read recent Lupin ledger events from local GitHub checkouts."""
+    local = {repo["repo"]: repo for repo in repositories}
+    unavailable = any(repo not in local for repo in enabled)
+    updates: list[dict] = []
+    for repo in repositories:
+        name = repo["repo"]
+        identity = roadmap._github_repo_from_remote(
+            roadmap._git_remote_url(os.path.join(CODE_DIR, name))
+        )
+        if not identity:
+            unavailable |= name in enabled
+            continue
+        owner, full_name = identity
+        limit = 256
+        try:
+            events, has_more = ledger.read_events_page(
+                f"{owner}/{full_name}", limit=limit, **connection
+            )
+        except (CoordinatorUnreachable, redis.exceptions.RedisError):
+            unavailable = True
+            continue
+        visible_events = [
+            event for event in events if event.get("event") != "supervise"
+        ]
+        if len(visible_events) < 6 and has_more:
+            unavailable = True
+        updates.extend(
+            {**event, "repo": name} for event in visible_events[-6:]
+        )
+    updates.sort(
+        key=lambda event: str(event.get("timestamp") or ""), reverse=True
+    )
+    return updates[:6], unavailable
+
+
+def render_overview_quota(snapshot: dict | None) -> str:
+    now_ms = int(time.time() * 1000)
+    entries = snapshot or {}
+    lines = []
+    unavailable = not entries
+    stale = False
+    ahead = False
+    for provider, entry in sorted(entries.items()):
+        entry_fresh = isinstance(entry, dict) and quota_cache.is_fresh(entry)
+        if not entry_fresh:
+            stale = True
+        rows = entry.get("rows") if isinstance(entry, dict) else None
+        if not isinstance(rows, list) or not rows:
+            unavailable = True
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                unavailable = True
+                continue
+            used = quota_progress_pct(row)
+            name = quota_row_name({
+                **row, "provider": row.get("provider") or provider,
+            })
+            period = quota_duration_label(row)
+            if row.get("error") or row.get("note") or used is None:
+                unavailable = True
+                detail = NOT_AVAILABLE
+            else:
+                status, pace = quota_status(row, now_ms)
+                unavailable |= status == "Status unavailable"
+                ahead |= pace == "ahead"
+                detail = f"{used:g}% used · {status}"
+                reset = time_until_reset(row.get("resets_at"), now_ms)
+                if reset != "-":
+                    detail += f" · resets {reset}"
+            if not entry_fresh:
+                detail += " · stale"
+            lines.append(
+                f"<li><span>{esc(name)} · {esc(period)}</span>"
+                f"<span>{esc(detail)}</span></li>"
+            )
+
+    warnings = []
+    if stale:
+        warnings.append("Quota data stale")
+    if unavailable:
+        warnings.append("Quota status unavailable")
+    if ahead:
+        warnings.append("Quota needs attention")
+    summary = " · ".join(warnings) if warnings else "No quota warning"
+    status_class = "warn" if warnings else "ok"
+    if lines:
+        detail_html = "<ul class=overview-quota>" + "".join(lines[:4]) + "</ul>"
+        if len(lines) > 4:
+            detail_html += f"<div class=stat-note>And {len(lines) - 4} more in Usage.</div>"
+    else:
+        detail_html = "<div class=stat-note>No cached quota data.</div>"
+    return (
+        f"<div class='card stat {status_class}'>"
+        f"<div class=stat-label>{icon('M5 20V10M12 20V4M19 20v-7', 13)}Quota</div>"
+        f"<div class=stat-value>{esc(summary)}</div>{detail_html}"
+        "<div class=stat-note><a href='/usage'>Quota details</a></div></div>"
+    )
+
+
+def render_overview_updates(updates: list[dict], unavailable: bool = False) -> str:
+    rows = []
+    for update in updates:
+        timestamp = update.get("timestamp")
+        try:
+            epoch = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
+            when = f"<span data-since='{epoch:.0f}'></span>"
+        except (AttributeError, TypeError, ValueError):
+            when = "<span class=dim>time unavailable</span>"
+        title = f"{update.get('repo', 'repo')} · {update.get('event', 'update')}"
+        if update.get("issue"):
+            title += f" · #{update['issue']}"
+        detail = update.get("summary") or ", ".join(update.get("highlights") or [])
+        if not detail:
+            detail = update.get("status") or "Activity recorded."
+        rows.append(
+            "<div class=overview-feed-item>"
+            f"<span class=overview-feed-time>{when}</span>"
+            f"<div class=overview-feed-copy><b>{esc(title)}</b>"
+            f"<div class=dim>{esc(detail)}</div></div></div>"
+        )
+    if rows:
+        status = (
+            "<p class='dim stale'>Some recent updates are unavailable.</p>"
+            if unavailable else ""
+        )
+        content = status + "".join(rows)
+    elif unavailable:
+        content = "<p class='dim stale'>Recent updates are unavailable.</p>"
+    else:
+        content = "<p class=dim>No recent updates.</p>"
+    return (
+        "<div class=section-head><h2>Recent updates</h2></div>"
+        f"<div class='card overview-feed'>{content}</div>"
+    )
+
+
 def gather(peek_lines: int, connection: dict | None = None) -> dict:
     del peek_lines
     connection = connection or {}
@@ -803,6 +946,7 @@ def gather(peek_lines: int, connection: dict | None = None) -> dict:
         "claims": loop_state["claims"],
         "fleet_error": loop_state["fleet_error"],
     })
+    local_repos = state["repos"]
     state["repos"] = merge_repo_inventory(
         state["repos"], state["machines"], machines.hostname()
     )
@@ -814,6 +958,19 @@ def gather(peek_lines: int, connection: dict | None = None) -> dict:
             if repo.get("enabled") is True or repo.get("fleet_enabled") is True
         }
     )
+    if state["fleet_error"]:
+        state["quota_snapshot"] = None
+        state["recent_updates"] = []
+        state["recent_updates_unavailable"] = True
+    else:
+        try:
+            state["quota_snapshot"] = quota_cache.read_snapshot(**connection)
+        except (CoordinatorUnreachable, redis.exceptions.RedisError):
+            state["quota_snapshot"] = None
+        (
+            state["recent_updates"],
+            state["recent_updates_unavailable"],
+        ) = _recent_updates(local_repos, state["enabled"], connection)
     return state
 
 
@@ -1033,6 +1190,15 @@ color:var(--ink2);flex-wrap:wrap}
 .dot.idle{background:var(--idle)}
 .loop-tail{margin:10px 0 0;max-height:4.6em}
 .loop-empty{display:flex;gap:14px;align-items:center}
+.overview-quota,.overview-feed{display:grid;gap:.6rem}
+.overview-quota{margin:.3rem 0 0;padding:0}
+.overview-quota li{display:flex;justify-content:space-between;gap:.5rem;
+font-size:.76rem}
+.overview-quota li span{min-width:0;overflow-wrap:anywhere}
+.overview-feed-item{display:grid;grid-template-columns:4.5rem minmax(0,1fr);
+gap:.75rem;padding:.65rem 0;border-top:1px solid var(--line2)}
+.overview-feed-time{font:400 .75rem var(--mono);color:var(--dim)}
+.overview-feed-copy{min-width:0;overflow-wrap:anywhere}
 @media(max-width:860px){
 .shell{flex-direction:column}
 .side{width:auto;height:auto;position:static;flex-direction:row;align-items:center;
@@ -1296,16 +1462,17 @@ def page(
 
 
 def render_dashboard(state: dict) -> bytes:
-    loops = [entry for entry in state.get("loops", []) if entry["status"] not in ("stopped", "unknown")]
+    all_loops = state.get("loops", [])
+    unknown_loops = [entry for entry in all_loops if entry["status"] == "unknown"]
+    live_loops = [
+        entry for entry in all_loops if entry["status"] not in ("stopped", "unknown")
+    ]
+    loops = [*live_loops, *unknown_loops]
     enabled = set(state["enabled"])
 
     recurring = [t for t in state["timers"] if t["unit"] == "delegation-loop.timer"]
     oneoffs = [t for t in state["timers"] if t["unit"] != "delegation-loop.timer"]
     nxt = recurring[0]["next"] if recurring and recurring[0]["next"] else None
-
-    attention = []
-    if not state["timer_active"]:
-        attention.append("timer paused")
 
     body = [f'<header><h1>{icon("M3 11l9-8 9 8M5 10v10h14V10")}Overview</h1></header>']
 
@@ -1314,43 +1481,42 @@ def render_dashboard(state: dict) -> bytes:
     body.append(
         '<div class="card stat">'
         f'<div class="stat-label">{icon("M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3", 13)}Live loops</div>'
-        f'<div class="stat-value">{esc(len(loops))}</div>'
-        f'<div class="stat-note">{esc(len(enabled))} repos enabled</div></div>'
+        f'<div class="stat-value">{esc(len(live_loops))}</div>'
+        f'<div class="stat-note">{esc(len(enabled))} repos enabled'
+        f'{" · " + str(len(unknown_loops)) + " state unavailable" if unknown_loops else ""}</div></div>'
     )
     if nxt:
+        paused = " · timer paused" if not state["timer_active"] else ""
         body.append(
             '<div class="card stat">'
             f'<div class="stat-label">{icon("M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z", 13)}Next run</div>'
             f'<div class="stat-value mono" data-until="{nxt:.0f}"></div>'
-            f'<div class="stat-note">{esc(time.strftime("%a %H:%M:%S %Z", time.localtime(nxt)))}</div></div>'
+            f'<div class="stat-note">{esc(time.strftime("%a %H:%M:%S %Z", time.localtime(nxt)) + paused)}</div></div>'
         )
     else:
+        paused = "<div class=stat-note>Timer paused.</div>" if not state["timer_active"] else ""
         body.append(
             '<div class="card stat">'
             f'<div class="stat-label">{icon("M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z", 13)}Next run</div>'
-            '<div class="stat-value">None scheduled</div></div>'
+            f'<div class="stat-value">None scheduled</div>{paused}</div>'
         )
-    body.append(
-        f'<div class="card stat {"warn" if attention else "ok"}">'
-        f'<div class="stat-label">{icon("M12 3l10 18H2zM12 10v5M12 18h.01", 13)}Needs attention</div>'
-        f'<div class="stat-value">{esc("; ".join(attention)) if attention else "All clear"}</div></div>'
-    )
+    body.append(render_overview_quota(state.get("quota_snapshot")))
     body.append("</div>")
 
     # ---- live loops ----------------------------------------------------
     body.append(
         f'<div class="section-head">{icon("M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3", 15)}<h2>Live loops</h2></div>'
     )
-    if not loops:
-        body.append(
-            "<div class='card loop-empty dim'>No live loops."
-            + (
+    if not live_loops:
+        message = "No live loops."
+        if unknown_loops:
+            message += f" State unavailable for {len(unknown_loops)} repo(s)."
+        else:
+            message += (
                 f" Next run <span data-until='{nxt:.0f}'></span>."
-                if nxt
-                else " No next run scheduled."
+                if nxt else " No next run scheduled."
             )
-            + "</div>"
-        )
+        body.append(f"<div class='card loop-empty dim'>{message}</div>")
     body.append('<div class="loop-grid">')
     for entry in loops:
         body.append(
@@ -1370,6 +1536,12 @@ def render_dashboard(state: dict) -> bytes:
             body.append(f"<span class=dim>on {esc(entry['machine'])}</span>")
         body.append("</div></a>")
     body.append("</div>")
+    body.append(
+        render_overview_updates(
+            state.get("recent_updates", []),
+            state.get("recent_updates_unavailable", False),
+        )
+    )
     # ---- coming up --------------------------------------------------------
     body.append(
         f'<div class="section-head">{icon("M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z", 15)}<h2>Coming up</h2></div>'

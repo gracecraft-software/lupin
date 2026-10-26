@@ -13,6 +13,7 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from importlib import resources
@@ -180,6 +181,298 @@ class TimerTests(unittest.TestCase):
         self.assertNotIn("data-once-repo='repo-no-doc'", page)
         self.assertNotIn("lupin once repo-disabled", page)
         self.assertNotIn("repo(s) missing docs/delegation-loop.md", page)
+
+
+class OverviewContextTests(unittest.TestCase):
+    @staticmethod
+    def _base_state(**overrides):
+        state = {
+            "loops": [],
+            "enabled": [],
+            "timers": [],
+            "timer_active": True,
+            "repos": [],
+            "quota_snapshot": {},
+            "recent_updates": [],
+            "recent_updates_unavailable": False,
+        }
+        state.update(overrides)
+        return state
+
+    @staticmethod
+    def _quota_row(used_pct, resets_at):
+        return {
+            "provider": "openai",
+            "account": "plus",
+            "duration": serve.QuotaDuration.FIVE_HOURS,
+            "used_pct": used_pct,
+            "resets_at": resets_at,
+        }
+
+    def test_overview_shows_current_run_quota_attention_and_recent_update(self):
+        now_ms = int(time.time() * 1000)
+        snapshot = {
+            "openai": {
+                "rows": [self._quota_row(90, now_ms + 9_000_000)],
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "fetched_by": "pihome",
+            }
+        }
+        state = self._base_state(
+            loops=[{"repo": "lupin", "status": "working", "machine": "pihome"}],
+            enabled=["lupin"],
+            quota_snapshot=snapshot,
+            recent_updates=[{
+                "repo": "lupin",
+                "event": "handoff",
+                "issue": 49,
+                "summary": "Overview context added.",
+                "timestamp": "2026-10-25T00:00:00Z",
+            }],
+        )
+
+        page = serve.render_dashboard(state).decode()
+
+        self.assertIn("<b>lupin</b>", page)
+        self.assertIn(">working<", page)
+        self.assertIn("Quota needs attention", page)
+        self.assertIn("openai (plus) · 5 hours", page)
+        self.assertIn("90% used · Ahead of pace", page)
+        self.assertIn("lupin · handoff · #49", page)
+        self.assertIn("Overview context added.", page)
+
+    def test_overview_has_clear_empty_states_with_fresh_quota(self):
+        now_ms = int(time.time() * 1000)
+        state = self._base_state(
+            quota_snapshot={
+                f"provider-{index}": {
+                    "rows": [{
+                        **self._quota_row(20, now_ms + 9_000_000),
+                        "provider": f"provider-{index}",
+                    }],
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                }
+                for index in range(5)
+            }
+        )
+
+        page = serve.render_dashboard(state).decode()
+
+        self.assertIn("No live loops.", page)
+        self.assertIn("No quota warning", page)
+        self.assertIn("No recent updates.", page)
+        self.assertNotIn("Quota status unavailable", page)
+        self.assertIn("And 1 more in Usage.", page)
+        self.assertNotIn("provider-4 ·", page)
+
+    def test_overview_marks_missing_quota_unavailable(self):
+        page = serve.render_dashboard(self._base_state()).decode()
+
+        self.assertIn("Quota status unavailable", page)
+        self.assertIn("No cached quota data.", page)
+        self.assertNotIn("No quota warning", page)
+
+    def test_overview_marks_stale_quota_and_unknown_loop_state(self):
+        state = self._base_state(
+            loops=[{"repo": "lupin", "status": "unknown", "machine": "pihome"}],
+            enabled=["lupin"],
+            quota_snapshot={
+                "openai": {
+                    "rows": [self._quota_row(20, int(time.time() * 1000) + 9_000_000)],
+                    "fetched_at": "2000-01-01T00:00:00+00:00",
+                }
+            },
+            recent_updates_unavailable=True,
+        )
+
+        page = serve.render_dashboard(state).decode()
+
+        self.assertIn("State unavailable for 1 repo(s).", page)
+        self.assertIn(">unknown<", page)
+        self.assertIn("Quota data stale", page)
+        self.assertNotIn("No quota warning", page)
+        self.assertIn("Recent updates are unavailable.", page)
+        self.assertNotIn("No recent updates.", page)
+
+    def test_recent_updates_show_newest_six_and_hide_supervisor_events(self):
+        events = [
+            {
+                "event": "handoff",
+                "summary": f"Update {index}.",
+                "timestamp": f"2026-10-25T00:00:{index:02d}Z",
+            }
+            for index in range(7)
+        ]
+        events.append({
+            "event": "supervise",
+            "summary": "Supervisor pass.",
+            "timestamp": "2026-10-25T00:01:00Z",
+        })
+        with (
+            mock.patch.object(
+                serve.roadmap, "_git_remote_url",
+                return_value="https://github.com/example/service-a.git",
+            ),
+            mock.patch.object(
+                serve.ledger,
+                "read_events_page",
+                return_value=(events, False),
+            ),
+        ):
+            updates, unavailable = serve._recent_updates(
+                [{"repo": "service-a"}], ["service-a"], {}
+            )
+
+        page = serve.render_dashboard(
+            self._base_state(
+                recent_updates=updates,
+                recent_updates_unavailable=unavailable,
+            )
+        ).decode()
+
+        self.assertFalse(unavailable)
+        self.assertLess(page.index("Update 6."), page.index("Update 5."))
+        self.assertNotIn("Update 0.", page)
+        self.assertNotIn("Supervisor pass.", page)
+        self.assertEqual(sum(page.count(f"Update {i}.") for i in range(7)), 6)
+
+    def test_recent_updates_read_past_eight_supervisor_events(self):
+        events = [{
+            "event": "handoff",
+            "summary": "Older handoff.",
+            "timestamp": "2026-10-25T00:00:00Z",
+        }]
+        events.extend({
+            "event": "supervise",
+            "summary": f"Supervisor pass {index}.",
+            "timestamp": f"2026-10-25T00:{index + 1:02d}:00Z",
+        } for index in range(8))
+
+        def read_events_page(_repository, limit, **_connection):
+            return events[-limit:], len(events) > limit
+
+        with (
+            mock.patch.object(
+                serve.roadmap, "_git_remote_url",
+                return_value="https://github.com/example/service-a.git",
+            ),
+            mock.patch.object(
+                serve.ledger, "read_events_page", side_effect=read_events_page
+            ),
+        ):
+            updates, unavailable = serve._recent_updates(
+                [{"repo": "service-a"}], ["service-a"], {}
+            )
+
+        page = serve.render_dashboard(
+            self._base_state(
+                recent_updates=updates,
+                recent_updates_unavailable=unavailable,
+            )
+        ).decode()
+
+        self.assertFalse(unavailable)
+        self.assertIn("Older handoff.", page)
+        self.assertNotIn("No recent updates.", page)
+        self.assertNotIn("Supervisor pass", page)
+
+    def test_recent_updates_stop_at_cap_and_mark_incomplete(self):
+        events = [{
+            "event": "handoff",
+            "summary": "Older handoff.",
+            "timestamp": "2026-10-25T00:00:00Z",
+        }]
+        events.extend({
+            "event": "supervise",
+            "summary": f"Supervisor pass {index}.",
+            "timestamp": "2026-10-26T00:00:00Z",
+        } for index in range(1000))
+        read_limits = []
+        read_sizes = []
+
+        def read_events_page(_repository, limit, **_connection):
+            page = events[-limit:]
+            read_limits.append(limit)
+            read_sizes.append(len(page))
+            return page, len(events) > limit
+
+        with (
+            mock.patch.object(
+                serve.roadmap, "_git_remote_url",
+                return_value="https://github.com/example/service-a.git",
+            ),
+            mock.patch.object(
+                serve.ledger, "read_events_page", side_effect=read_events_page
+            ),
+        ):
+            updates, unavailable = serve._recent_updates(
+                [{"repo": "service-a"}], ["service-a"], {}
+            )
+
+        page = serve.render_dashboard(
+            self._base_state(
+                recent_updates=updates,
+                recent_updates_unavailable=unavailable,
+            )
+        ).decode()
+
+        self.assertEqual(read_limits, [256])
+        self.assertEqual(sum(read_sizes), 256)
+        self.assertTrue(unavailable)
+        self.assertEqual(updates, [])
+        self.assertIn("Recent updates are unavailable.", page)
+        self.assertNotIn("No recent updates.", page)
+        self.assertNotIn("Older handoff.", page)
+
+
+def test_recent_updates_detects_truncation_after_skipped_raw_entry(
+    redis_port, flush_redis
+):
+    connection = _kw(redis_port)
+    client = ledger._client(**connection)
+    key = ledger._stream_key("example/service-a")
+    client.xadd(key, {
+        "ts": "2026-10-25T00:00:00Z",
+        "host": "worker-a",
+        "event": "handoff",
+        "summary": "Older handoff.",
+    })
+    pipeline = client.pipeline()
+    for index in range(255):
+        pipeline.xadd(key, {
+            "ts": f"2026-10-26T00:{index % 60:02d}:00Z",
+            "host": "worker-a",
+            "event": "supervise",
+        })
+    pipeline.xadd(key, {
+        "ts": "2026-10-26T00:00:00Z",
+        "host": "worker-a",
+        "event": "supervise",
+        "summary": b"\xff",
+    })
+    pipeline.execute()
+    assert client.xlen(key) == 257
+
+    with mock.patch.object(
+        serve.roadmap, "_git_remote_url",
+        return_value="https://github.com/example/service-a.git",
+    ):
+        updates, unavailable = serve._recent_updates(
+            [{"repo": "service-a"}], ["service-a"], connection
+        )
+
+    page = serve.render_dashboard(
+        OverviewContextTests._base_state(
+            recent_updates=updates,
+            recent_updates_unavailable=unavailable,
+        )
+    ).decode()
+
+    assert unavailable
+    assert updates == []
+    assert "Recent updates are unavailable." in page
+    assert "No recent updates." not in page
+    assert "Older handoff." not in page
 
 
 class TimeFormattingTests(unittest.TestCase):
@@ -1932,6 +2225,10 @@ def test_dashboard_degrades_when_redis_unreachable(closed_port):
 
     assert status == 200
     assert "Fleet registry unreachable" in body
+    assert "Quota status unavailable" in body
+    assert "No quota warning" not in body
+    assert "Recent updates are unavailable." in body
+    assert "No recent updates." not in body
 
 
 def test_do_post_quest_start_creates_quest_writes_redis_and_redirects(

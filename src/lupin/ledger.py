@@ -151,6 +151,26 @@ def append_event(
     return {"id": stream_id, **record}
 
 
+def _decode_entries(entries) -> list[dict]:
+    records = []
+    for raw_id, raw_fields in entries:
+        stream_id = raw_id.decode("utf-8") if isinstance(raw_id, bytes) else raw_id
+        try:
+            fields = {
+                name.decode("utf-8") if isinstance(name, bytes) else name:
+                value.decode("utf-8") if isinstance(value, bytes) else value
+                for name, value in raw_fields.items()
+            }
+            records.append(_decode(stream_id, fields))
+        except (KeyError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+            print(
+                f"ledger: skipped bad entry {stream_id}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+    return records
+
+
 def read_events(
     repo: str,
     *,
@@ -193,20 +213,40 @@ def read_events(
         raise CoordinatorUnreachable(repo) from exc
     if limit is not None:
         entries = reversed(entries)
-    records = []
-    for raw_id, raw_fields in entries:
-        stream_id = raw_id.decode("utf-8") if isinstance(raw_id, bytes) else raw_id
-        try:
-            fields = {
-                name.decode("utf-8") if isinstance(name, bytes) else name:
-                value.decode("utf-8") if isinstance(value, bytes) else value
-                for name, value in raw_fields.items()
-            }
-            records.append(_decode(stream_id, fields))
-        except (KeyError, UnicodeDecodeError, ValueError, RecursionError) as exc:
-            print(
-                f"ledger: skipped bad entry {stream_id}: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-    return records
+    return _decode_entries(entries)
+
+
+def read_events_page(
+    repo: str,
+    *,
+    limit: int,
+    redis_host: str | None = None,
+    redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
+    client: "redis.Redis | None" = None,
+) -> tuple[list[dict], bool]:
+    """Return one bounded page and whether older raw entries remain.
+
+    Read at most `limit + 1` raw entries. The extra entry detects older
+    history. A bad entry counts toward the page limit even when it is skipped.
+    """
+    key = _stream_key(repo)
+    if (
+        not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
+    ):
+        raise ValueError("limit must be a positive integer")
+    if client is None:
+        client = _client(
+            redis_host, redis_port, redis_username, redis_password,
+            decode_responses=False,
+        )
+    try:
+        entries = _call_with_retry(
+            lambda: client.xrevrange(key, count=limit + 1)
+        )
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+        raise CoordinatorUnreachable(repo) from exc
+    has_more = len(entries) > limit
+    records = _decode_entries(reversed(entries[:limit]))
+    return records, has_more
