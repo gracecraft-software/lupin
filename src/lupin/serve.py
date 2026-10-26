@@ -51,7 +51,84 @@ ATTACHMENT_REDIRECT_HOST = re.compile(
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_FORM_BYTES = 8 * 1024
 IMAGE_TYPES = {"image/gif", "image/jpeg", "image/png", "image/webp"}
-FAVICON = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><path fill="#e11d48" d="M16 28S3 20.4 3 11.5A7.5 7.5 0 0 1 16 7.4a7.5 7.5 0 0 1 13 4.1C29 20.4 16 28 16 28Z"/></svg>"""
+FAVICON = b'''<svg xmlns="http://www.w3.org/2000/svg" width="130" height="180" viewBox="0 0 13 18" shape-rendering="crispEdges">
+    <rect x="6" y="0" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="5" y="1" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="6" y="1" width="1" height="1" fill="#8a63d9"/>
+    <rect x="7" y="1" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="5" y="2" width="1" height="1" fill="#8a63d9"/>
+    <rect x="6" y="2" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="7" y="2" width="1" height="1" fill="#8a63d9"/>
+    <rect x="4" y="3" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="5" y="3" width="1" height="1" fill="#8a63d9"/>
+    <rect x="6" y="3" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="7" y="3" width="1" height="1" fill="#8a63d9"/>
+    <rect x="8" y="3" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="4" y="4" width="1" height="1" fill="#8a63d9"/>
+    <rect x="5" y="4" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="6" y="4" width="1" height="1" fill="#8a63d9"/>
+    <rect x="7" y="4" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="8" y="4" width="1" height="1" fill="#8a63d9"/>
+    <rect x="3" y="5" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="4" y="5" width="1" height="1" fill="#8a63d9"/>
+    <rect x="5" y="5" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="6" y="5" width="1" height="1" fill="#8a63d9"/>
+    <rect x="7" y="5" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="8" y="5" width="1" height="1" fill="#8a63d9"/>
+    <rect x="9" y="5" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="2" y="6" width="1" height="1" fill="#8a63d9"/>
+    <rect x="3" y="6" width="7" height="1" fill="#d4c3f7"/>
+    <rect x="10" y="6" width="1" height="1" fill="#8a63d9"/>
+    <rect x="2" y="7" width="1" height="1" fill="#8a63d9"/>
+    <rect x="3" y="7" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="4" y="7" width="1" height="1" fill="#2a2340"/>
+    <rect x="5" y="7" width="3" height="1" fill="#d4c3f7"/>
+    <rect x="8" y="7" width="1" height="1" fill="#2a2340"/>
+    <rect x="9" y="7" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="10" y="7" width="1" height="1" fill="#8a63d9"/>
+    <rect x="2" y="8" width="1" height="1" fill="#8a63d9"/>
+    <rect x="3" y="8" width="1" height="1" fill="#f4a6c4"/>
+    <rect x="4" y="8" width="2" height="1" fill="#d4c3f7"/>
+    <rect x="6" y="8" width="1" height="1" fill="#2a2340"/>
+    <rect x="7" y="8" width="2" height="1" fill="#d4c3f7"/>
+    <rect x="9" y="8" width="1" height="1" fill="#f4a6c4"/>
+    <rect x="10" y="8" width="1" height="1" fill="#8a63d9"/>
+    <rect x="2" y="9" width="1" height="1" fill="#8a63d9"/>
+    <rect x="3" y="9" width="7" height="1" fill="#d4c3f7"/>
+    <rect x="10" y="9" width="1" height="1" fill="#8a63d9"/>
+    <rect x="2" y="10" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="3" y="10" width="1" height="1" fill="#8a63d9"/>
+    <rect x="4" y="10" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="5" y="10" width="1" height="1" fill="#8a63d9"/>
+    <rect x="6" y="10" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="7" y="10" width="1" height="1" fill="#8a63d9"/>
+    <rect x="8" y="10" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="9" y="10" width="1" height="1" fill="#8a63d9"/>
+    <rect x="10" y="10" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="3" y="11" width="1" height="1" fill="#8a63d9"/>
+    <rect x="4" y="11" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="5" y="11" width="1" height="1" fill="#8a63d9"/>
+    <rect x="6" y="11" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="7" y="11" width="1" height="1" fill="#8a63d9"/>
+    <rect x="8" y="11" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="9" y="11" width="1" height="1" fill="#8a63d9"/>
+    <rect x="4" y="12" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="5" y="12" width="1" height="1" fill="#8a63d9"/>
+    <rect x="6" y="12" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="7" y="12" width="1" height="1" fill="#8a63d9"/>
+    <rect x="8" y="12" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="6" y="13" width="1" height="1" fill="#3f8a5a"/>
+    <rect x="2" y="14" width="2" height="1" fill="#93d1a0"/>
+    <rect x="6" y="14" width="1" height="1" fill="#3f8a5a"/>
+    <rect x="9" y="14" width="2" height="1" fill="#93d1a0"/>
+    <rect x="2" y="15" width="3" height="1" fill="#93d1a0"/>
+    <rect x="6" y="15" width="1" height="1" fill="#3f8a5a"/>
+    <rect x="8" y="15" width="3" height="1" fill="#93d1a0"/>
+    <rect x="3" y="16" width="3" height="1" fill="#93d1a0"/>
+    <rect x="6" y="16" width="1" height="1" fill="#3f8a5a"/>
+    <rect x="7" y="16" width="3" height="1" fill="#93d1a0"/>
+    <rect x="6" y="17" width="1" height="1" fill="#3f8a5a"/>
+</svg>'''
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

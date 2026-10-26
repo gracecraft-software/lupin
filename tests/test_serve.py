@@ -18,6 +18,7 @@ from pathlib import Path
 from importlib import resources
 from unittest import mock
 from urllib.parse import quote
+from xml.etree import ElementTree
 
 import pytest
 import redis as redis_lib
@@ -493,6 +494,43 @@ class DashboardRouteTests(unittest.TestCase):
         head = serve.page("test", "").decode()
         self.assertIn("href='/favicon.ico' type='image/svg+xml'", head)
         self.assertIn("name=viewport", head)
+
+    def test_favicon_matches_lupin_flower_pixels(self):
+        rows = [
+            "l", "lPl", "PlP", "lPlPl", "PlPlP", "lPlPlPl", "PlllllllP",
+            "PlelllelP", "PbllellbP", "PlllllllP", "lPlPlPlPl", "PlPlPlP",
+            "lPlPl", "g", "GG..g..GG", "GGG.g.GGG", ".GGGgGGG.", "g",
+        ]
+        palette = {
+            "l": "#d4c3f7",
+            "P": "#8a63d9",
+            "e": "#2a2340",
+            "b": "#f4a6c4",
+            "g": "#3f8a5a",
+            "G": "#93d1a0",
+        }
+        root = ElementTree.fromstring(serve.FAVICON)
+        self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
+        self.assertEqual(root.attrib["viewBox"], "0 0 13 18")
+
+        actual = {}
+        for rect in root:
+            self.assertEqual(rect.tag, "{http://www.w3.org/2000/svg}rect")
+            x, y, width, height = (
+                int(rect.attrib[key]) for key in ("x", "y", "width", "height")
+            )
+            self.assertEqual(height, 1)
+            for col in range(x, x + width):
+                self.assertNotIn((col, y), actual)
+                actual[col, y] = rect.attrib["fill"]
+
+        expected = {}
+        for y, row in enumerate(rows):
+            row = ("." * ((13 - len(row)) // 2) + row).ljust(13, ".")
+            for x, char in enumerate(row):
+                if char != ".":
+                    expected[x, y] = palette[char]
+        self.assertEqual(actual, expected)
 
 
 class MachinesRouteUnitTests(unittest.TestCase):
