@@ -1059,21 +1059,36 @@ font-size:.85rem;margin:1.25rem 0}
 .quota-legend-unknown{width:2px;height:14px;background:none;
 border-left:2px dashed var(--fg)}
 .quota-legend-ahead{width:28px;height:8px;border-radius:4px;background:var(--warn)}
-.quota-groups{display:grid;gap:.8rem}
-.quota-group{padding:1.2rem 1.4rem .4rem}
-.quota-group-heading{display:flex;justify-content:space-between;align-items:baseline;
-gap:.75rem;flex-wrap:wrap;margin-bottom:.4rem}
-.quota-group-heading h3{margin:0;font-size:1.1rem}
-.quota-row{display:grid;grid-template-columns:minmax(90px,120px) minmax(0,1fr)
-minmax(130px,170px);gap:1.5rem;align-items:center;padding:1rem 0;
-border-top:1px solid var(--line)}
-.quota-window{font-weight:500}
-.quota-status{font-size:.8rem;color:var(--dim);margin-top:.2rem}
-.quota-status.ahead{color:var(--warn)}
-.quota-status.under{color:var(--accent)}
-.quota-values{display:flex;justify-content:space-between;gap:1rem;
-font-size:.85rem;color:var(--dim);margin-bottom:.45rem}
-.quota-values strong{font-size:1.2rem;color:var(--fg)}
+.quota-matrix-scroll{max-width:100%;min-width:0;overflow-x:auto;
+border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+.quota-matrix{width:100%}
+.quota-matrix thead th{background:var(--surface);white-space:nowrap}
+.quota-matrix tbody th,.quota-matrix td{vertical-align:top}
+.quota-matrix tbody .quota-owner-cell{position:sticky;left:0;z-index:1;
+width:180px;min-width:160px;background:var(--surface);color:var(--fg);
+font-size:.85rem;letter-spacing:0;text-transform:none}
+.quota-matrix th:not(:first-child),.quota-matrix td:not(:first-child){
+min-width:220px}
+@media(max-width:480px){
+.quota-matrix thead th:first-child,.quota-matrix tbody .quota-owner-cell{
+width:min(136px,calc(100vw - 254px));min-width:min(136px,calc(100vw - 254px))}
+.quota-matrix thead th:first-child{white-space:normal}
+}
+@media(max-width:350px){
+.quota-matrix thead th:first-child,.quota-matrix tbody .quota-owner-cell{
+width:136px;min-width:136px}
+.quota-matrix tbody .quota-owner-cell{position:static}
+}
+.quota-owner{display:grid;gap:.15rem}
+.quota-owner-account{color:var(--dim);font-weight:400}
+.quota-provider-source{font-size:.75rem;color:var(--dim);margin-top:.4rem}
+.quota-provider-note{font-size:.8rem;color:var(--dim);margin-top:.4rem}
+.quota-matrix-empty{color:var(--dim);text-align:center;vertical-align:middle}
+.quota-cell+.quota-cell{border-top:1px solid var(--line);margin-top:.75rem;
+padding-top:.75rem}
+.quota-values{display:flex;justify-content:space-between;gap:.5rem;
+font-size:.8rem;color:var(--dim);margin-bottom:.4rem}
+.quota-values strong{font-size:1.05rem;color:var(--fg)}
 .quota-meter{position:relative;height:9px;border-radius:5px;background:var(--line)}
 .quota-meter-used{position:absolute;inset:0 auto 0 0;border-radius:5px;
 background:var(--accent)}
@@ -1082,11 +1097,16 @@ background:var(--accent)}
 border-radius:1px;background:var(--fg)}
 .quota-meter-elapsed-unknown{left:0;width:0;background:none;
 border-left:2px dashed var(--fg);opacity:.6}
-.quota-reset{text-align:right}
-.quota-reset-left{font:500 1rem ui-monospace,monospace}
-.quota-reset-at{font:400 .75rem ui-monospace,monospace;color:var(--dim);margin-top:.2rem}
-@media(max-width:700px){.quota-row{grid-template-columns:1fr;gap:.5rem}
-.quota-reset{text-align:left}}
+.quota-cell-footer{display:flex;justify-content:space-between;align-items:flex-start;
+gap:.5rem;flex-wrap:wrap;margin-top:.5rem}
+.quota-status{font-size:.8rem;color:var(--dim)}
+.quota-status.ahead{color:var(--warn)}
+.quota-status.under{color:var(--accent)}
+.quota-pace-note{font-size:.75rem;color:var(--dim);margin-top:.15rem}
+.quota-reset{text-align:right;flex:none}
+.quota-reset-left{font:500 .9rem ui-monospace,monospace}
+.quota-reset-at{font:400 .7rem ui-monospace,monospace;color:var(--dim);
+margin-top:.2rem;white-space:nowrap}
 .tier-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:.8rem}
 .tier-card{margin-bottom:0;display:flex;flex-direction:column;gap:.45rem}
 .tier-heading{display:flex;justify-content:space-between;align-items:baseline;gap:.75rem}
@@ -1530,7 +1550,7 @@ def quota_duration_label(row: dict) -> str:
     duration = row.get("duration", QuotaDuration.OTHER)
     if isinstance(duration, QuotaDuration) and duration is not QuotaDuration.OTHER:
         return duration.label
-    return row.get("label", "Other")
+    return str(row.get("label") or "Other")
 
 
 def quota_progress_pct(row: dict) -> float | None:
@@ -1617,9 +1637,14 @@ def render_quota_summary(rows: list[dict], now_ms: int) -> str:
     ) + "</div>"
 
 
-def render_quota_row(row: dict, now_ms: int) -> str:
+def quota_window_key(row: dict) -> tuple[str, str, int | None]:
     duration = row.get("duration", QuotaDuration.OTHER)
     duration_value = duration.value if isinstance(duration, QuotaDuration) else str(duration)
+    return duration_value, quota_duration_label(row), quota_window_milliseconds(row)
+
+
+def render_quota_cell(row: dict, now_ms: int) -> str:
+    duration_value, _label, _milliseconds = quota_window_key(row)
     reset_at_ms = row.get("resets_at")
     reset_timestamp = "" if reset_at_ms is None else str(reset_at_ms)
     used = quota_progress_pct(row)
@@ -1635,41 +1660,105 @@ def render_quota_row(row: dict, now_ms: int) -> str:
             "title='time elapsed in window'></div>"
         )
     elif used is not None:
-        # The row keeps its marker. A dashed marker says the elapsed time
-        # cannot be placed, because the window length is unknown
-        # (issue #80).
+        # Keep a dashed marker when the source does not give a window length.
         elapsed_marker = (
             "<div class='quota-meter-elapsed quota-meter-elapsed-unknown' "
             "title='time elapsed in window: window length unknown'></div>"
         )
     else:
         elapsed_marker = ""
-    account_html = f"<div class=dim>{esc(row['account'])}</div>" if row.get("account") else ""
-    note_html = f"<div class='dim'>{esc(pace_note)}</div>" if pace_note else ""
+    note_html = f"<div class=quota-pace-note>{esc(pace_note)}</div>" if pace_note else ""
     aria_label = "quota usage unavailable"
     if used is not None and elapsed is not None:
         aria_label = f"{used:.0f}% used, {elapsed:.0f}% of window elapsed"
     elif used is not None:
         aria_label = f"{used:.0f}% used, pace not shown" if pace_note else f"{used:.0f}% used"
     return (
-        f"<div class=quota-row data-window-duration='{esc(duration_value)}' "
+        f"<div class=quota-cell data-window-duration='{esc(duration_value)}' "
         f"data-resets-at-ms='{esc(reset_timestamp)}'>"
-        "<div><div class=quota-window>"
-        f"{esc(quota_duration_label(row))}</div>"
-        f"{account_html}"
-        f"<div class='quota-status {status_class}'>{esc(status)}</div>"
-        f"{note_html}</div>"
-        "<div>"
         f"<div class=quota-values><span><strong>{available_text}</strong> available</span>"
         f"<span>{used_text} used</span></div>"
         f"<div class=quota-meter role=img aria-label='{esc(aria_label)}'>"
         f"<div class='quota-meter-used {status_class}' style='width:{used_width}'></div>"
-        f"{elapsed_marker}</div></div>"
+        f"{elapsed_marker}</div>"
+        f"<div class=quota-cell-footer><div>"
+        f"<div class='quota-status {status_class}'>{esc(status)}</div>{note_html}</div>"
         f"<div class=quota-reset><div class=quota-reset-left>"
         f"{esc(time_until_reset(reset_at_ms, now_ms))}</div>"
-        f"<div class=quota-reset-at>{esc(epoch_ms_to_local(reset_at_ms))}</div></div>"
-        "</div>"
+        f"<div class=quota-reset-at>{esc(epoch_ms_to_local(reset_at_ms))}</div>"
+        "</div></div></div>"
     )
+
+
+def render_quota_matrix(
+    rows: list[dict], entries_by_provider: dict[str, dict], now_ms: int
+) -> str:
+    groups = {}
+    window_labels = {}
+    for row in rows:
+        provider = row["provider"]
+        account = str(row.get("account") or "")
+        group = groups.setdefault(
+            (provider, account), {"windows": {}, "messages": []}
+        )
+        if "error" in row:
+            message = NOT_AVAILABLE
+        elif "note" in row:
+            message = plain_message(row.get("note", ""))
+        else:
+            window = quota_window_key(row)
+            window_labels[window] = quota_duration_label(row)
+            group["windows"].setdefault(window, []).append(row)
+            continue
+        if message:
+            group["messages"].append(message)
+
+    windows = sorted(
+        window_labels,
+        key=lambda key: (
+            key[2] is None, key[2] or 0, key[1].casefold(), key[0],
+        ),
+    )
+    parts = [
+        "<div class='scroll quota-matrix-scroll'><table class=quota-matrix>"
+        "<thead><tr><th scope=col>Provider / account</th>"
+    ]
+    parts.extend(f"<th scope=col>{esc(window_labels[key])}</th>" for key in windows)
+    parts.append("</tr></thead><tbody>")
+
+    for (provider, account), group in sorted(
+        groups.items(), key=lambda item: (item[0][0].casefold(), item[0][1].casefold())
+    ):
+        entry = entries_by_provider.get(provider) or {}
+        age = _snapshot_age(entry.get("fetched_at"))
+        fetched_by = esc(entry.get("fetched_by", "-"))
+        stale = "" if quota_cache.is_fresh(entry) else " &middot; <span class=stale>stale</span>"
+        account_html = (
+            f" <span class=quota-owner-account>{esc(account)}</span>" if account else ""
+        )
+        messages = "".join(
+            f"<div class=quota-provider-note>{esc(message)}</div>"
+            for message in group["messages"]
+        )
+        parts.append(
+            f"<tr><th scope=row class=quota-owner-cell><div class=quota-owner>"
+            f"<strong>{esc(provider)}</strong>{account_html}</div>"
+            f"<div class=quota-provider-source>{esc(quota_source_label(provider))}"
+            f" &middot; fetched {age} via {fetched_by}{stale}</div>{messages}</th>"
+        )
+        for window in windows:
+            matching = group["windows"].get(window, [])
+            if matching:
+                cells = "".join(render_quota_cell(row, now_ms) for row in matching)
+                parts.append(f"<td class=quota-matrix-cell>{cells}</td>")
+            else:
+                parts.append(
+                    "<td class=quota-matrix-empty "
+                    "aria-label='No cached quota for this provider and window'>—</td>"
+                )
+        parts.append("</tr>")
+    parts.append("</tbody></table></div>")
+    return "".join(parts)
 
 
 def render_quota_legend(rows: list[dict], now_ms: int) -> str:
@@ -1764,46 +1853,22 @@ def render_usage(*, connection: dict | None = None) -> bytes:
         f"<span class=dim>Data timestamp: {esc(fetched) if fetched else 'not available'}</span></div>",
         render_quota_summary(quota_rows, now_ms),
         render_quota_legend(quota_rows, now_ms),
-        "<div class=quota-groups>",
     ]
-    if not quota_rows:
+    if quota_rows:
+        body.append(render_quota_matrix(quota_rows, fetched_by_provider, now_ms))
+    else:
         body.append(
             "<p class=dim>No quota data cached yet -- run <code>lupin quota</code> "
             "on a machine with real provider credentials.</p>"
         )
-    groups: dict[str, list[dict]] = {}
-    for row in quota_rows:
-        groups.setdefault(row["provider"], []).append(row)
-    for provider, rows in groups.items():
-        entry = fetched_by_provider.get(provider) or {}
-        age = _snapshot_age(entry.get("fetched_at"))
-        fetched_by = entry.get("fetched_by", "-")
-        stale = "" if quota_cache.is_fresh(entry) else " &middot; <span class=stale>stale</span>"
-        body.append(
-            f"<section class='card quota-group'><div class=quota-group-heading>"
-            f"<h3>{esc(provider)}</h3><span class=dim>"
-            f"{esc(quota_source_label(provider))} &middot; fetched {age} via {esc(fetched_by)}{stale}"
-            "</span></div>"
-        )
-        for row in rows:
-            if "error" in row or "note" in row:
-                # A failed source shows a plain state. The detail stays in
-                # the log (issue #51).
-                if "error" in row:
-                    message = NOT_AVAILABLE
-                else:
-                    message = plain_message(row.get("note", ""))
-                body.append(f"<p class=dim>{esc(message)}</p>")
-            else:
-                body.append(render_quota_row(row, now_ms))
-        body.append("</section>")
     body.append(
-        "</div><p class=dim>Bars show quota used; the marker shows time elapsed "
-        "in the window. A dashed marker means the window length is unknown, so "
-        "the elapsed time cannot be placed. The reset time appears at the right. "
-        "OpenCode Go uses omp or Orca's usage API; Claude uses Anthropic's OAuth "
-        "usage API. OpenAI uses omp or Codex's latest local snapshot, which only "
-        "updates when Codex writes a session event.</p>"
+        "<p class=dim>A dash means no cached quota for that provider and window. "
+        "Bars show quota used; the marker shows time elapsed in the window. A "
+        "dashed marker means the window length is unknown, so the elapsed time "
+        "cannot be placed. The reset time appears at the right. OpenCode Go uses "
+        "omp or Orca's usage API; Claude uses Anthropic's OAuth usage API. "
+        "OpenAI uses omp or Codex's latest local snapshot, which only updates "
+        "when Codex writes a session event.</p>"
     )
     body.append("<h2>7-day totals</h2>")
     if usage_snapshots:

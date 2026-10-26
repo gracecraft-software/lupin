@@ -1,5 +1,6 @@
 import contextlib
 import html
+from html.parser import HTMLParser
 import io
 import socket
 import sys
@@ -190,6 +191,46 @@ class TimeFormattingTests(unittest.TestCase):
         self.assertEqual(serve.time_until_reset(None, now_ms=0), "-")
 
 
+class _QuotaMatrixParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.in_matrix = False
+        self.rows = []
+        self.row = None
+        self.cell = None
+        self.windows = []
+        self.age_markers = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "table" and "quota-matrix" in attributes.get("class", "").split():
+            self.in_matrix = True
+        elif self.in_matrix and tag == "tr":
+            self.row = []
+        elif self.in_matrix and tag in {"th", "td"} and self.row is not None:
+            self.cell = {"tag": tag, "attrs": attributes, "text": ""}
+        elif self.in_matrix and "data-window-duration" in attributes:
+            self.windows.append(attributes)
+        if self.in_matrix and "data-since" in attributes:
+            self.age_markers.append(attributes)
+
+    def handle_data(self, data):
+        if self.cell is not None:
+            self.cell["text"] += data
+
+    def handle_endtag(self, tag):
+        if not self.in_matrix:
+            return
+        if tag in {"td", "th"} and self.cell is not None:
+            self.row.append(self.cell)
+            self.cell = None
+        elif tag == "tr" and self.row is not None:
+            self.rows.append(self.row)
+            self.row = None
+        elif tag == "table":
+            self.in_matrix = False
+
+
 class QuotaRenderingTests(unittest.TestCase):
     """`/usage` rendering only. The shared quota and 7-day usage snapshots
     are mocked, so these tests cover how rows become HTML.
@@ -202,7 +243,7 @@ class QuotaRenderingTests(unittest.TestCase):
             "used_pct": 42,
             "resets_at": 302_400_000,
         }
-        rendered = serve.render_quota_row(row, now_ms=0)
+        rendered = serve.render_quota_cell(row, now_ms=0)
 
         self.assertEqual(serve.time_remaining_pct(row, now_ms=0), 50)
         self.assertEqual(serve.quota_elapsed_pct(row, now_ms=0), 50)
@@ -221,7 +262,7 @@ class QuotaRenderingTests(unittest.TestCase):
             "used_pct": 42,
             "resets_at": 302_400_000,
         }
-        rendered = serve.render_quota_row(row, now_ms=0)
+        rendered = serve.render_quota_cell(row, now_ms=0)
 
         self.assertIn("quota-meter-elapsed", rendered)
         self.assertIn("quota-meter-elapsed-unknown", rendered)
@@ -231,7 +272,7 @@ class QuotaRenderingTests(unittest.TestCase):
         # The same row with a known window length gets a real marker and a
         # real pace status, even though the window name is unknown.
         row["duration_ms"] = 604_800_000
-        rendered = serve.render_quota_row(row, now_ms=0)
+        rendered = serve.render_quota_cell(row, now_ms=0)
 
         self.assertEqual(serve.quota_elapsed_pct(row, now_ms=0), 50)
         self.assertIn("left:50.0%", rendered)
@@ -262,23 +303,105 @@ class QuotaRenderingTests(unittest.TestCase):
         self.assertNotIn("FileNotFoundError", page)
         self.assertNotIn("/var/lib/delegation-loop", page)
 
-    def test_quota_section_groups_by_provider_and_precedes_totals(self):
-        # Real-shaped row, as `quota.quota_usage()` would produce it --
-        # confirmed against that module's own tests.
-        reset_at_ms = 1_790_547_474_348
-        rows = [{
-            "provider": "opencode-go",
-            "duration": serve.QuotaDuration.MONTHLY,
-            "label": "Monthly limit",
-            "used_pct": 64.0,
-            "resets_at": reset_at_ms,
-            "generated_at": "2026-01-01 00:00:00",
-        }]
+    def test_usage_quota_matrix_compares_windows_and_live_metadata(self):
+        now_ms = int(time.time() * 1000)
+        generated_at = "2026-01-01 00:00:00"
+        five_hour_reset = now_ms + 2 * 60 * 60 * 1000 + 30 * 60 * 1000
+        rows = [
+            {
+                "provider": "openai",
+                "account": "plus",
+                "duration": serve.QuotaDuration.FIVE_HOURS,
+                "used_pct": 42,
+                "resets_at": five_hour_reset,
+                "generated_at": generated_at,
+            },
+            {
+                "provider": "openai",
+                "account": "plus",
+                "duration": serve.QuotaDuration.WEEKLY,
+                "used_pct": 55,
+                "resets_at": now_ms + 48 * 60 * 60 * 1000,
+                "generated_at": generated_at,
+            },
+            {
+                "provider": "openai",
+                "account": "free",
+                "duration": serve.QuotaDuration.MONTHLY,
+                "used_pct": 100,
+                "resets_at": now_ms + 120 * 60 * 60 * 1000,
+                "generated_at": generated_at,
+            },
+            {
+                "provider": "claude",
+                "duration": serve.QuotaDuration.WEEKLY,
+                "used_pct": 45,
+                "resets_at": now_ms + 72 * 60 * 60 * 1000,
+                "generated_at": generated_at,
+            },
+        ]
         snapshot = {
-            "opencode-go": {
-                "rows": rows,
+            provider: {
+                "rows": [row for row in rows if row["provider"] == provider],
                 "fetched_at": "2026-01-01T00:00:00+00:00",
                 "fetched_by": "jesus",
+            }
+            for provider in ("openai", "claude")
+        }
+        with (
+            mock.patch.object(quota_cache, "read_snapshot", return_value=snapshot),
+            mock.patch.object(usage_cache, "read_snapshot", return_value={}),
+        ):
+            page = serve.render_usage().decode()
+
+        parser = _QuotaMatrixParser()
+        parser.feed(page)
+        self.assertEqual(len(parser.age_markers), 3)
+        self.assertEqual(
+            [cell["text"].strip() for cell in parser.rows[0]],
+            ["Provider / account", "5 hours", "7 days", "Monthly"],
+        )
+        plus = next(row for row in parser.rows[1:] if "openai plus" in row[0]["text"])
+        self.assertIn("fetched", plus[0]["text"])
+        self.assertIn("via jesus", plus[0]["text"])
+        self.assertIn("stale", plus[0]["text"])
+        self.assertIn("58% available", plus[1]["text"])
+        self.assertIn("42% used", plus[1]["text"])
+        self.assertIn("On pace", plus[1]["text"])
+        self.assertIn(serve.epoch_ms_to_local(five_hour_reset), plus[1]["text"])
+        self.assertEqual(plus[3]["text"].strip(), "—")
+        self.assertEqual(
+            plus[3]["attrs"]["aria-label"],
+            "No cached quota for this provider and window",
+        )
+        five_hour_cell = next(
+            cell for cell in parser.windows
+            if cell["data-window-duration"] == "PT5H"
+        )
+        self.assertEqual(
+            five_hour_cell["data-resets-at-ms"], str(five_hour_reset)
+        )
+        free = next(row for row in parser.rows[1:] if "openai free" in row[0]["text"])
+        self.assertIn("100% used", free[3]["text"])
+        self.assertIn("Needs attention", page)
+        self.assertLess(
+            page.index("class=quota-matrix"), page.index("<h2>7-day totals</h2>")
+        )
+
+    def test_usage_matrix_uses_other_for_null_unknown_window_label(self):
+        row = {
+            "provider": "openai",
+            "duration": serve.QuotaDuration.OTHER,
+            "label": None,
+            "used_pct": 42,
+            "resets_at": 302_400_000,
+            "generated_at": "2026-01-01 00:00:00",
+        }
+        snapshot = {
+            "openai": {
+                "rows": [row],
+                "fetched_at": "2026-01-01T00:00:00+00:00",
+                "fetched_by": "synthetic",
             }
         }
         with (
@@ -287,23 +410,13 @@ class QuotaRenderingTests(unittest.TestCase):
         ):
             page = serve.render_usage().decode()
 
-        self.assertIn(
-            f"data-window-duration='P30D' data-resets-at-ms='{reset_at_ms}'",
-            page,
+        parser = _QuotaMatrixParser()
+        parser.feed(page)
+        self.assertEqual(
+            [cell["text"].strip() for cell in parser.rows[0]],
+            ["Provider / account", "Other"],
         )
-        self.assertIn("<h3>opencode-go</h3>", page)
-        self.assertIn("<span><strong>36%</strong> available</span>", page)
-        self.assertIn("64% used", page)
-        self.assertIn("quota-meter-elapsed", page)
-        self.assertIn("Needs attention", page)
-        self.assertIn("Most used", page)
-        self.assertIn("Next reset", page)
-        self.assertLess(page.index("<h2>Quota</h2>"), page.index("<h2>7-day totals</h2>"))
-        self.assertIn("Data timestamp: 2026-01-01 00:00:00", page)
-        # Staleness is visible, per provider -- fetched via this fake "jesus".
-        self.assertIn("fetched", page)
-        self.assertIn("via jesus", page)
-        self.assertIn("stale", page)
+        self.assertEqual(parser.windows[0]["data-window-duration"], "OTHER")
 
     def test_usage_page_names_the_account_of_each_row(self):
         reset_at_ms = 1_790_547_474_348
@@ -322,15 +435,14 @@ class QuotaRenderingTests(unittest.TestCase):
         ):
             page = serve.render_usage().decode()
 
-        self.assertIn("<div class=dim>free</div>", page)
-        self.assertIn("<div class=dim>plus</div>", page)
+        parser = _QuotaMatrixParser()
+        parser.feed(page)
+        owners = [row[0]["text"] for row in parser.rows[1:]]
+        self.assertTrue(any("openai free" in owner for owner in owners))
+        self.assertTrue(any("openai plus" in owner for owner in owners))
         # The summary names the account too: free is the most used row.
         self.assertIn("openai (free)", page)
 
-    def test_usage_page_has_no_account_line_for_one_account(self):
-        row = {"provider": "claude", "duration": serve.QuotaDuration.FIVE_HOURS,
-               "used_pct": 40.0, "resets_at": 1_790_547_474_348}
-        self.assertNotIn("class=dim>", serve.render_quota_row(row, 0))
 
     def test_quota_note_and_error_rows_render_as_dim_text(self):
         omp_snapshot = {
@@ -345,8 +457,7 @@ class QuotaRenderingTests(unittest.TestCase):
             mock.patch.object(usage_cache, "read_snapshot", return_value={}),
         ):
             page = serve.render_usage().decode()
-        self.assertIn("<h3>omp</h3>", page)
-        self.assertIn("<p class=dim>Not available</p>", page)
+        self.assertIn("<div class=quota-provider-note>Not available</div>", page)
         self.assertNotIn("RuntimeError", page)
 
         claude_snapshot = {
@@ -361,8 +472,7 @@ class QuotaRenderingTests(unittest.TestCase):
             mock.patch.object(usage_cache, "read_snapshot", return_value={}),
         ):
             page = serve.render_usage().decode()
-        self.assertIn("<h3>claude</h3>", page)
-        self.assertIn("quota unavailable", page)
+        self.assertIn("<div class=quota-provider-note>quota unavailable</div>", page)
 
     def test_seven_day_totals_aggregate_machine_snapshots_and_show_staleness(self):
         now = serve.datetime.now(serve.timezone.utc).isoformat()
