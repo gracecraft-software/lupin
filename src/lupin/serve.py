@@ -622,10 +622,13 @@ def merge_repo_inventory(
                     "hosts": set(),
                     "running_hosts": set(),
                     "enabled_hosts": set(),
+                    "already_enabled_hosts": set(),
                     "enable_hosts": set(),
                 },
             )
             is_enabled = item.get("enabled") is True
+            if is_enabled:
+                entry["already_enabled_hosts"].add(host)
             entry["enabled"] |= is_enabled
             entry["loopable"] |= item.get("loopable") is True
             label = f"{host} (offline)" if record.get("state") == "offline" else host
@@ -643,6 +646,7 @@ def merge_repo_inventory(
         if repo in repos:
             repos[repo]["fleet_enabled"] = entry["enabled"]
             repos[repo]["enabled_hosts"] = sorted(entry["enabled_hosts"])
+            repos[repo]["already_enabled_hosts"] = sorted(entry["already_enabled_hosts"])
             repos[repo]["enable_hosts"] = sorted(entry["enable_hosts"])
             continue
         state = "enabled" if entry["enabled"] else "disabled"
@@ -656,6 +660,7 @@ def merge_repo_inventory(
             "running_machines": ", ".join(sorted(entry["running_hosts"])),
             "machine": ", ".join(sorted(entry["hosts"])),
             "enabled_hosts": sorted(entry["enabled_hosts"]),
+            "already_enabled_hosts": sorted(entry["already_enabled_hosts"]),
             "enable_hosts": sorted(entry["enable_hosts"]),
         }
     return sorted(repos.values(), key=lambda repo: repo["repo"])
@@ -2395,25 +2400,24 @@ REPOS_ICON = "M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6
 
 
 def _repo_slot_controls(repo: str, current_max: int) -> str:
-    """Same fewer/more button-pair shape `_slot_controls` uses on the
-    Machines page, but the form only ever posts `repo` -- `do_repos_slot_max`
-    derives the actual slot name (`_repo_slot_name`) itself, so a request
-    can only ever change the one slot that belongs to the repo it named,
-    never an arbitrary slot string chosen by the browser.
-    """
+    """Render controls for changing this repo's concurrency limit."""
     fewer = max(1, current_max - 1)
     more = current_max + 1
     fewer_disabled = " disabled" if current_max <= 1 else ""
+    fewer_label = f"Decrease concurrency limit for {repo} to {fewer}"
+    more_label = f"Increase concurrency limit for {repo} to {more}"
     return (
         "<form method=post action=/repos/slot-max style='display:inline'>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         f"<input type=hidden name=max value='{fewer}'>"
-        f"<button type=submit{fewer_disabled} aria-label='Lower max'>&minus;</button></form> "
+        f"<button type=submit{fewer_disabled} title='{esc(fewer_label)}' "
+        f"aria-label='{esc(fewer_label)}'>&minus;</button></form> "
         f"<span class=mono>{current_max}</span> "
         "<form method=post action=/repos/slot-max style='display:inline'>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         f"<input type=hidden name=max value='{more}'>"
-        "<button type=submit aria-label='Raise max'>+</button></form>"
+        f"<button type=submit title='{esc(more_label)}' "
+        f"aria-label='{esc(more_label)}'>+</button></form>"
     )
 
 
@@ -2469,12 +2473,14 @@ def _render_add_panel(tab: str, repos: list[dict]) -> str:
         add_form = (
             "<form method=post action=/repos/add style='display:inline'>"
             f"<input type=hidden name=repo value='{esc(repo)}'>"
-            "<button type=submit>Add to schedule</button></form>"
+            f"<button type=submit title='Add {esc(repo)} to the recurring schedule'>"
+            "Add to schedule</button></form>"
         )
         generate_form = (
             "<form method=post action=/repos/generate-docs style='display:inline'>"
             f"<input type=hidden name=repo value='{esc(repo)}'>"
-            "<button type=submit>Generate docs and add</button></form>"
+            f"<button type=submit title='Generate docs and add {esc(repo)} to the recurring schedule'>"
+            "Generate docs and add</button></form>"
             if not r.get("has_doc")
             else ""
         )
@@ -2512,7 +2518,8 @@ def _render_doc_panel(repo: str, text: str, edit: bool) -> str:
             f"<textarea name=text spellcheck=false "
             "style='width:100%;height:230px;font-family:monospace;box-sizing:border-box'>"
             f"{esc(text)}</textarea>"
-            "<div class=row style='margin-top:.4rem'><button type=submit>Save</button>"
+            f"<div class=row style='margin-top:.4rem'><button type=submit "
+            f"title='Save changes to {esc(repo)}/{esc(LOOP_DOC)}'>Save</button>"
             f"<a href='{view_href}'>cancel</a></div></form>"
         )
     else:
@@ -2538,7 +2545,7 @@ def _render_schedule_panel(repo: str) -> str:
         f"<b>Schedule a one-off run for {esc(repo)}</b>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         "<input type=text name=when placeholder='15:00, +2h, tomorrow 09:00' required>"
-        "<button type=submit>Schedule</button>"
+        "<button type=submit title='Schedule a one-off run'>Schedule one-off run</button>"
         "<a href='/repos'>Cancel</a>"
         "</form>"
         "<p class=dim>Runs once, in addition to the recurring schedule. Same as "
@@ -2556,7 +2563,7 @@ def _render_remove_panel(repo: str) -> str:
         f"running. Files in {esc(CODE_DIR)} are untouched. Type the repo name to confirm.</div></div>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         f"<input type=text name=confirm placeholder='{esc(repo)}' required>"
-        "<button type=submit>Remove repo</button>"
+        "<button type=submit title='Remove this repo from the schedule'>Remove repo</button>"
         "<a href='/repos'>Cancel</a>"
         "</form></div>"
     )
@@ -2564,26 +2571,38 @@ def _render_remove_panel(repo: str) -> str:
 
 def _remote_repo_controls(repo: str, entry: dict) -> str:
     controls = []
+    for machine in entry.get("already_enabled_hosts", []):
+        controls.append(
+            "<button type=button disabled "
+            f"title='{esc(repo)} is already enabled on {esc(machine)}' "
+            f"aria-label='Enable {esc(repo)} on {esc(machine)} (already enabled)' "
+            "style='opacity:.45;cursor:not-allowed'>"
+            f"Enable on {esc(machine)}</button>"
+        )
     for machine in entry.get("enabled_hosts", []):
         controls.append(
             "<form method=post action=/loops/start style='display:inline'>"
             f"<input type=hidden name=repo value='{esc(repo)}'>"
             f"<input type=hidden name=machine value='{esc(machine)}'>"
-            f"<button type=submit>Start on {esc(machine)}</button></form>"
+            f"<button type=submit title='Start {esc(repo)} on {esc(machine)}' "
+            f"aria-label='Start {esc(repo)} on {esc(machine)}'>"
+            f"Start on {esc(machine)}</button></form>"
         )
     for machine in entry.get("enable_hosts", []):
         controls.append(
             "<form method=post action=/repos/enable style='display:inline'>"
             f"<input type=hidden name=repo value='{esc(repo)}'>"
             f"<input type=hidden name=machine value='{esc(machine)}'>"
-            f"<button type=submit>Enable on {esc(machine)}</button></form>"
+            f"<button type=submit title='Enable {esc(repo)} on {esc(machine)}' "
+            f"aria-label='Enable {esc(repo)} on {esc(machine)}'>"
+            f"Enable on {esc(machine)}</button></form>"
         )
     return " ".join(controls)
 
 
 def _render_repo_table(repos: list[dict], local_host: str) -> str:
     rows = [
-        "<tr><th>repo</th><th>state</th><th>loops &middot; max</th>"
+        "<tr><th>repo</th><th>state</th><th>loops &middot; concurrency</th>"
         "<th>machine</th><th>roadmap</th><th>actions</th></tr>"
     ]
     for r in repos:
@@ -2608,13 +2627,20 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
         sess_label = "running" if r["running"] else "stopped"
         current_max = r["max"] if r["max"] is not None else 1
         stepper = _repo_slot_controls(repo, current_max)
-        roadmap_link = f"<a href='/roadmap?repo={quote(repo, safe='')}'>Roadmap</a>"
+        roadmap_link = (
+            f"<a href='/roadmap?repo={quote(repo, safe='')}' "
+            f"title='Open the roadmap for {esc(repo)}'>Roadmap</a>"
+        )
         doc_action = (
-            f"<a href='/repos?doc={quote(repo, safe='')}'>doc</a>"
+            f"<a href='/repos?doc={quote(repo, safe='')}' "
+            f"title='View {esc(repo)}/{esc(LOOP_DOC)}'>doc</a>"
             if r.get("has_doc")
             else "<span class=dim>no doc (optional)</span>"
         )
-        schedule_link = f"<a href='/repos?schedule={quote(repo, safe='')}'>Schedule&hellip;</a>"
+        schedule_link = (
+            f"<a href='/repos?schedule={quote(repo, safe='')}' "
+            f"title='Schedule a one-off run for {esc(repo)}'>Schedule one-off&hellip;</a>"
+        )
         if r["state"] == "enabled":
             place_choice = "spread" if _coordinator_only() else local_host
             run_form = (
@@ -2622,15 +2648,21 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
                 f"<input type=hidden name=repo value='{esc(repo)}'>"
                 "<input type=hidden name=cnt value=1>"
                 f"<input type=hidden name=place value='{esc(place_choice)}'>"
-                "<button type=submit>Run now</button></form>"
+                f"<button type=submit title='Start one loop for {esc(repo)} now' "
+                f"aria-label='Start one loop for {esc(repo)} now'>Run now</button></form>"
             )
-            remove_link = f"<a href='/repos?remove={quote(repo, safe='')}'>Remove</a>"
+            remove_link = (
+                f"<a href='/repos?remove={quote(repo, safe='')}' "
+                f"title='Remove {esc(repo)} from recurring and one-off schedules'>Remove</a>"
+            )
             actions = f"{run_form} {schedule_link} &middot; {doc_action} &middot; {remove_link}"
         else:
             add_btn = (
                 "<form method=post action=/repos/add style='display:inline'>"
                 f"<input type=hidden name=repo value='{esc(repo)}'>"
-                "<button type=submit>Add to schedule</button></form>"
+                f"<button type=submit title='Add {esc(repo)} to the recurring schedule' "
+                f"aria-label='Add {esc(repo)} to the recurring schedule'>"
+                "Add to schedule</button></form>"
             )
             actions = f"{add_btn} {schedule_link} &middot; {doc_action}"
         remote_controls = _remote_repo_controls(repo, r)
@@ -2696,7 +2728,15 @@ def render_repos(
             "(loop status and concurrency caps below are limited to this machine).</p>"
         )
 
-    return page("Repos", "".join(body), active="repos", extra_js=DOC_EDITOR_JS)
+    extra_js = DOC_EDITOR_JS
+    if sent is not None:
+        extra_js += (
+            ";{const url=new URL(location.href);"
+            "if(url.searchParams.has(\"sent\")){"
+            "url.searchParams.delete(\"sent\");"
+            "history.replaceState(null,\"\",url);}}"
+        )
+    return page("Repos", "".join(body), active="repos", extra_js=extra_js)
 
 
 TIMER_WINDOW_S = 4 * 3600  # the mockup's 4-hour timeline strip
@@ -3619,22 +3659,31 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("cannot reach the redis coordinator"), 502)
             return
         record = next((row for row in records if row.get("name") == machine), None)
+        if not record:
+            self.reply(render_error(f"remote machine {machine} is not registered"), 400)
+            return
+        if record.get("state") == "offline":
+            self.reply(render_error(f"machine {machine} is offline"), 400)
+            return
+        if record.get("state") != "online":
+            self.reply(render_error(f"machine {machine} is not online"), 400)
+            return
         known_repo = next(
             (
-                item for item in (record or {}).get("repos", [])
+                item for item in record.get("repos", [])
                 if isinstance(item, dict) and item.get("repo") == repo
             ),
             None,
         )
+        if known_repo and known_repo.get("enabled") is True:
+            self.reply(render_error(f"{repo} is already enabled on {machine}"), 400)
+            return
         if (
-            not record
-            or record.get("state") != "online"
-            or not known_repo
-            or known_repo.get("enabled") is True
+            not known_repo
             or known_repo.get("loopable") is not True
             or "repo.enable" not in record.get("actions", [])
         ):
-            self.reply(render_error("remote repository cannot be enabled on that machine"), 400)
+            self.reply(render_error(f"remote repository cannot be enabled on {machine}"), 400)
             return
         signing_key = self._signing_key_for(machine)
         if not signing_key:
@@ -3748,7 +3797,8 @@ class Handler(BaseHTTPRequestHandler):
         except CoordinatorUnreachable:
             self.reply(render_error("cannot reach the machine registry"), 502)
             return
-        self.redirect("/repos")
+        sent = f"Concurrency limit for {repo} changed to {max_value}"
+        self.redirect(f"/repos?sent={quote(sent, safe='')}")
 
     def do_repos_schedule(self, form: dict) -> None:
         """Schedule one local one-off run through Lupin."""

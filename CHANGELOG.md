@@ -38,6 +38,9 @@ All notable changes to Lupin. The version has one source:
 
 ### Fixed
 
+- The Repos page names each action, labels concurrency changes, and clears
+  confirmation messages from the URL after they appear.
+
 - New loop prompts include saved repo instructions when the worktree copy
   is missing or different.
 - "Run now" passes dash-leading notes as one argument, and rejects notes

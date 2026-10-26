@@ -3514,15 +3514,18 @@ class RepoHelperTests(unittest.TestCase):
             with mock.patch.object(serve, "REPOS_FILE", repos_file):
                 self.assertEqual(serve.enabled_repos(), ["widgets"])
 
-    def test_slot_controls_disable_the_lower_button_at_the_minimum(self):
+    def test_slot_controls_disable_decrease_at_one_and_name_both_changes(self):
         html = serve._repo_slot_controls("widgets", 1)
         self.assertIn("disabled", html)
+        self.assertIn("Decrease concurrency limit for widgets to 1", html)
+        self.assertIn("Increase concurrency limit for widgets to 2", html)
 
-    def test_slot_controls_post_the_computed_neighbor_values(self):
+    def test_slot_controls_step_to_adjacent_limits_above_one(self):
         html = serve._repo_slot_controls("widgets", 3)
-        self.assertNotIn("disabled", html)
         self.assertIn("name=max value='2'", html)
         self.assertIn("name=max value='4'", html)
+        self.assertIn("Decrease concurrency limit for widgets to 2", html)
+        self.assertIn("Increase concurrency limit for widgets to 4", html)
 
     def test_code_repos_allows_a_directory_without_delegation_doc(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3635,11 +3638,12 @@ class GatherReposTests(unittest.TestCase):
 
         assert [repo["repo"] for repo in data["repos"]] == ["roundsmith"]
         assert "Enable on jesus" in page
+        assert "title='Enable roundsmith on jesus'" in page
         assert "action=/repos/enable" in page
         assert "action=/loops/start" not in page
         assert f"No local repos under {serve.CODE_DIR}" in page
 
-    def test_enabled_remote_repo_has_start_control(self):
+    def test_enabled_remote_repo_has_disabled_enable_state_and_start_control(self):
         machine = {
             "name": "jesus",
             "state": "online",
@@ -3663,9 +3667,42 @@ class GatherReposTests(unittest.TestCase):
             data = serve.gather_repos({})
 
         page = serve.render_repos(data).decode()
-        assert "Start on jesus" in page
-        assert "action=/loops/start" in page
-        assert "action=/repos/enable" not in page
+        self.assertIn("Start on jesus", page)
+        self.assertIn("<button type=button disabled", page)
+        self.assertIn("title='roundsmith is already enabled on jesus'", page)
+        self.assertIn("title='Start roundsmith on jesus'", page)
+        self.assertIn("action=/loops/start", page)
+        self.assertNotIn("action=/repos/enable", page)
+
+    def test_offline_enabled_remote_repo_renders_disabled_enable_control(self):
+        machine = {
+            "name": "jesus",
+            "state": "offline",
+            "actions": [],
+            "repos": [{"repo": "roundsmith", "enabled": True, "loopable": True}],
+            "loops": [],
+        }
+        with (
+            mock.patch.object(serve, "code_repos", return_value=[]),
+            mock.patch.object(
+                serve, "gather_loops",
+                return_value={
+                    "entries": [],
+                    "machines": [machine],
+                    "fleet_error": None,
+                    "local_host": "pihome",
+                },
+            ),
+            mock.patch.object(serve.slots_redis, "status", return_value={}),
+        ):
+            data = serve.gather_repos({})
+
+        page = serve.render_repos(data).decode()
+        self.assertIn("Enable on jesus", page)
+        self.assertIn("disabled", page)
+        self.assertIn("roundsmith is already enabled on jesus", page)
+        self.assertIn("jesus (offline)", page)
+        self.assertNotIn("action=/loops/start", page)
 
     def test_remote_controls_remain_available_for_a_local_repo_row(self):
         machine = {
@@ -3758,11 +3795,13 @@ class RepoRenderTests(unittest.TestCase):
     def test_enabled_row_has_run_now_and_remove(self):
         page = serve.render_repos(self._data()).decode()
         self.assertIn("action=/schedule/run", page)
+        self.assertIn("title='Start one loop for widgets now'", page)
         self.assertIn("/repos?remove=widgets", page)
 
     def test_disabled_row_has_add_to_schedule_not_a_remove_link(self):
         page = serve.render_repos(self._data()).decode()
         self.assertIn("action=/repos/add", page)
+        self.assertIn("title='Add gizmos to the recurring schedule'", page)
         self.assertNotIn("/repos?remove=gizmos", page)
 
     def test_no_doc_repo_keeps_schedule_controls(self):
@@ -3770,22 +3809,37 @@ class RepoRenderTests(unittest.TestCase):
         self.assertIn("no doc (optional)", page)
         self.assertIn("repo=scratch", page)
 
-    def test_slot_max_stepper_shows_the_current_value(self):
+    def test_slot_max_stepper_shows_the_current_value_and_concurrency_labels(self):
         page = serve.render_repos(self._data()).decode()
+        self.assertIn("<th>loops &middot; concurrency</th>", page)
         self.assertIn("<span class=mono>2</span>", page)
+        self.assertIn("Increase concurrency limit for widgets to 3", page)
 
     def test_empty_state_shown_when_no_repos(self):
         page = serve.render_repos(self._data(repos=[])).decode()
         self.assertIn("No repos yet", page)
 
-    def test_sent_banner_shown(self):
-        page = serve.render_repos(self._data(), sent="widgets added to the schedule").decode()
-        self.assertIn("widgets added to the schedule", page)
+    def test_sent_banner_is_rendered_with_one_time_url_cleanup(self):
+        page = serve.render_repos(
+            self._data(), sent="Concurrency limit for widgets changed to 3"
+        ).decode()
+        self.assertIn("Concurrency limit for widgets changed to 3", page)
+        self.assertIn('url.searchParams.delete("sent")', page)
+        self.assertIn("history.replaceState", page)
+
+    def test_page_without_sent_has_no_stale_message_cleanup(self):
+        page = serve.render_repos(self._data()).decode()
+        self.assertNotIn("url.searchParams.delete(\"sent\")", page)
+        self.assertNotIn("<div class=card><span class='pill on'>", page)
 
     def test_add_panel_offers_schedule_and_optional_doc_generation(self):
         page = serve.render_repos(self._data(), add="existing").decode()
         self.assertIn("action=/repos/add", page)
+        self.assertIn("title='Add gizmos to the recurring schedule'", page)
         self.assertIn("action=/repos/generate-docs", page)
+        self.assertIn(
+            "title='Generate docs and add scratch to the recurring schedule'", page
+        )
         self.assertIn("no delegation doc (optional)", page)
 
     def test_add_panel_new_tab_is_disabled_with_a_note(self):
@@ -3811,16 +3865,17 @@ class RepoRenderTests(unittest.TestCase):
         self.assertIn("hello doc", page)
         self.assertIn("widgets/docs/delegation-loop.md", page)
 
-    def test_doc_panel_edit_mode_shows_a_textarea(self):
+    def test_doc_panel_edit_mode_shows_a_textarea_and_save_effect(self):
         page = serve.render_repos(
             self._data(), doc_repo="widgets", doc_text="hello doc", doc_edit=True
         ).decode()
         self.assertIn("<textarea name=text", page)
+        self.assertIn("title='Save changes to widgets/docs/delegation-loop.md'", page)
 
-    def test_schedule_panel_shows_the_lupin_command(self):
+    def test_schedule_panel_names_the_one_off_action(self):
         page = serve.render_repos(self._data(), schedule_repo="widgets").decode()
-        self.assertIn("lupin once", page)
-        self.assertIn("widgets", page)
+        self.assertIn("Schedule a one-off run for widgets", page)
+        self.assertIn(">Schedule one-off run</button>", page)
 
     def test_remove_panel_asks_to_type_the_repo_name(self):
         page = serve.render_repos(self._data(), remove_repo="widgets").decode()
@@ -3908,6 +3963,64 @@ class TestReposPageRoutes:
             issuer="pihome",
         )
         handler.redirect.assert_called_once()
+
+    def test_stale_remote_enable_reports_already_enabled_reason(self, monkeypatch):
+        machine = {
+            "name": "jesus",
+            "state": "online",
+            "actions": ["repo.enable"],
+            "repos": [{"repo": "widgets", "enabled": True, "loopable": True}],
+        }
+        monkeypatch.setattr(serve.machines, "hostname", lambda: "pihome")
+        monkeypatch.setattr(serve.machines, "machines", lambda connection, **_: [machine])
+        dispatch = mock.Mock()
+        monkeypatch.setattr(serve.loops, "dispatch_loop_action", dispatch)
+        handler = _repos_handler()
+        handler._signing_key_for = lambda target: "jesus-key"
+        _post_body(handler, "/repos/enable", {"repo": "widgets", "machine": "jesus"})
+
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 400
+        assert "widgets is already enabled on jesus" in handler.reply.call_args.args[0].decode()
+        dispatch.assert_not_called()
+
+    def test_stale_remote_enable_reports_offline_reason(self, monkeypatch):
+        machine = {
+            "name": "jesus",
+            "state": "offline",
+            "actions": ["repo.enable"],
+            "repos": [{"repo": "widgets", "enabled": False, "loopable": True}],
+        }
+        monkeypatch.setattr(serve.machines, "hostname", lambda: "pihome")
+        monkeypatch.setattr(serve.machines, "machines", lambda connection, **_: [machine])
+        dispatch = mock.Mock()
+        monkeypatch.setattr(serve.loops, "dispatch_loop_action", dispatch)
+        handler = _repos_handler()
+        handler._signing_key_for = lambda target: "jesus-key"
+        _post_body(handler, "/repos/enable", {"repo": "widgets", "machine": "jesus"})
+
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 400
+        assert "machine jesus is offline" in handler.reply.call_args.args[0].decode()
+        dispatch.assert_not_called()
+
+    def test_slot_max_route_sets_limit_and_redirects_with_confirmation(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        set_max = mock.Mock()
+        monkeypatch.setattr(serve.slots_redis, "set_max", set_max)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/slot-max", {"repo": "widgets", "max": "4"})
+
+        handler.do_POST()
+
+        set_max.assert_called_once_with("repo:widgets", 4)
+        handler.redirect.assert_called_once_with(
+            f"/repos?sent={quote('Concurrency limit for widgets changed to 4', safe='')}"
+        )
+
 
     def test_add_route_rejects_a_missing_repository(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
@@ -4163,7 +4276,9 @@ class TestReposPageRoutes:
         _post_body(handler, "/repos/slot-max", {"repo": "widgets", "max": "3"})
         handler.do_POST()
         assert calls == {"slot": "repo:widgets", "max": 3}
-        handler.redirect.assert_called_once_with("/repos")
+        handler.redirect.assert_called_once_with(
+            f"/repos?sent={quote('Concurrency limit for widgets changed to 3', safe='')}"
+        )
 
     def test_slot_max_route_502_on_coordinator_unreachable(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
