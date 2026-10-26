@@ -31,6 +31,7 @@ All notable changes to Lupin. The version has one source:
   epics footer and the pager read the same way when the list is empty.
 - Roadmap repo-fetch warnings can be dismissed on Board and List. A dismissal
   stays hidden after a reload and applies to one repo and warning.
+- Completed Roadmap descriptions hide Markdown heading and bullet markers.
 - `lupin roadmap` text output shows one line per repo for issues with no
   priority label. `--json` still lists each issue. The triage and
   delegation-loop skills name skills in one form, and triage defines the

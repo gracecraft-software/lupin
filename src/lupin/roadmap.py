@@ -1374,6 +1374,31 @@ def _render_body(body: str) -> str:
     return f"<div class='issue-body'>{''.join(parts)}</div>"
 
 
+def _strip_completed_markers(body: str) -> str:
+    """Remove Markdown heading and list markers, but keep code blocks."""
+    lines = []
+    fence = None
+    for line in str(body or "").splitlines():
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if fence:
+            closing = re.match(r"^ {0,3}(`{3,}|~{3,})[ \t]*$", line)
+            if (
+                closing
+                and closing.group(1)[0] == fence[0]
+                and len(closing.group(1)) >= len(fence)
+            ):
+                fence = None
+            lines.append(line)
+            continue
+        if marker:
+            fence = marker.group(1)
+        else:
+            line = re.sub(r"^ {0,3}#{1,6}[ \t]+", "", line)
+            line = re.sub(r"^([ \t]{0,3})[-+*][ \t]+", r"\1", line)
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def render_issue_details(
     node: dict, include_comments: bool = True, quest_pick: bool = False
 ) -> str:
@@ -2262,6 +2287,7 @@ def render_completed_page(repo: str | None, repos: list[str], issues_by_repo: di
         for issue in sorted(issues, key=lambda row: row.get("updatedAt") or "", reverse=True):
             node = dict(issue)
             node["labels"] = _label_names(issue)
+            node["body"] = _strip_completed_markers(node["body"])
             node["comments"] = comments.get(issue["number"], [])
             items.append(render_issue_details(node, include_comments=False))
         groups.append(
