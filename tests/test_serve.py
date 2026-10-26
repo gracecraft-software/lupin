@@ -2187,6 +2187,10 @@ class TestMachinesPageIntegration:
         # snapshot would be empty at this point. The page still has to show
         # the lease below, so it must read slots_redis.status() live.
         kw = _kw(redis_port)
+        monkeypatch.setattr(machines.quota, "snapshot", lambda: {})
+        monkeypatch.setattr(machines.quota, "quota_usage", lambda: [])
+        monkeypatch.setattr(machines.quota, "claude_usage", lambda: [])
+        monkeypatch.setattr(machines.quota, "omp_usage", lambda: [])
         names = ["jesus", "pihome", "ralpha"]
         for name in names:
             monkeypatch.setattr(machines, "hostname", lambda name=name: name)
@@ -2209,6 +2213,12 @@ class TestMachinesPageIntegration:
         )
         monkeypatch.setattr(serve, "timer_active", lambda: True)
         slots_redis.acquire("bmo", "worker-a", max_holders=1, **kw)
+        client = slots_redis._client(kw["redis_host"], kw["redis_port"])
+        client.set(f"{slots_redis.PREFIX}slot:expired-demo:max", 2)
+        client.zadd(
+            f"{slots_redis.PREFIX}slot:expired-demo",
+            {"expired-holder": slots_redis._now_ms() - 1},
+        )
 
         handler = _get_handler("/machines", kw)
         handler.do_GET()
@@ -2224,6 +2234,38 @@ class TestMachinesPageIntegration:
         assert body.count("class=machine-card") == 3
         assert "lupin · omp" in body
         assert "Draining. Running loops can finish" in body
+
+        assert "A slot limits how many callers can use that resource at the same time, across all machines." in body
+        assert "Current holder IDs: <code>worker-a</code>" in body
+        assert "expired-holder" not in body
+        assert "No current holders" in body
+
+    def test_page_shows_unknown_slot_data_without_inventing_holder_ids(self):
+        page = serve.render_machines(
+            [
+                {"name": "draining-box", "state": "draining", "loops": [], "providers": []},
+                {"name": "offline-box", "state": "offline", "loops": [], "providers": []},
+            ],
+            {
+                "known": {"holders": 1, "max": 2, "holder_names": ["worker <one>"]},
+                "unattributed": {"holders": 1, "max": 2},
+                "unknown": {"holders": None, "max": None},
+            },
+        ).decode()
+
+        assert "worker &lt;one&gt;" in page
+        assert "Holder IDs unavailable" in page
+        assert "Holder count unavailable" in page
+        assert "<span class=mono>? / ?</span>" in page
+        assert "aria-label='Fewer slots'" in page
+        assert "aria-label='More slots'" in page
+        assert "aria-label='Fewer slots' disabled title='Slot limit is unavailable'" in page
+        assert "aria-label='More slots' disabled title='Slot limit is unavailable'" in page
+        assert "aria-label='More slots'>" in page
+        assert "<span class='machine-dot draining'></span>" in page
+        assert "<span class='machine-dot offline'></span>" in page
+        assert ".machine-dot.offline{background:var(--warn)}" in page
+        assert ".machine-dot.draining{background:var(--lav);transform:rotate(45deg)}" in page
 
     def test_unreachable_coordinator_is_502(self, closed_port):
         handler = _get_handler("/machines", {"redis_host": "127.0.0.1", "redis_port": closed_port})

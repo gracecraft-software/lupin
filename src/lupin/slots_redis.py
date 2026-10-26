@@ -412,10 +412,13 @@ def status(
     redis_username: str | None = None,
     redis_password: str | None = None,
     state_root: str | Path | None = None,
+    include_holder_names: bool = False,
 ) -> dict[str, dict]:
-    """Return `{slot_name: {"holders": live_count, "max": max_or_None}}`,
+    """Return counts and limits for each slot, and optionally live holder names,
     read from the sorted sets without pruning them (`ZREMRANGEBYSCORE` is an
     `acquire`/`renew` job, not this one's).
+    When requested, `holder_names` contains only unexpired Redis lease names.
+    The local fallback does not provide names.
 
     Listed by `:max` key, not by the sorted set itself -- Redis deletes a
     sorted set once its last member is removed, but a slot that has gone
@@ -437,9 +440,18 @@ def status(
         for max_key in max_keys:
             slot = max_key[len(f"{PREFIX}slot:") : -len(":max")]
             members = client.zrange(f"{PREFIX}slot:{slot}", 0, -1, withscores=True)
-            live = sum(1 for _holder, score in members if score >= now)
+            holder_names = [] if include_holder_names else None
+            live = 0
+            for holder, score in members:
+                if score >= now:
+                    live += 1
+                    if holder_names is not None:
+                        holder_names.append(holder)
             max_raw = client.get(max_key)
-            result[slot] = {"holders": live, "max": int(max_raw) if max_raw is not None else None}
+            info = {"holders": live, "max": int(max_raw) if max_raw is not None else None}
+            if holder_names is not None:
+                info["holder_names"] = holder_names
+            result[slot] = info
         return result
     except redis.exceptions.AuthenticationError as exc:
         raise _auth_failed(exc) from exc

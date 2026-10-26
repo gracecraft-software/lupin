@@ -2223,20 +2223,23 @@ def _heartbeat_epoch(stamp: str | None) -> float | None:
         return None
 
 
-def _slot_controls(slot: str, current_max: int) -> str:
+def _slot_controls(slot: str, current_max: int | None) -> str:
     """Fleet-wide slot limit controls with race-free next values."""
-    fewer = max(1, current_max - 1)
-    more = current_max + 1
-    fewer_disabled = " disabled" if current_max <= 1 else ""
+    unknown = current_max is None
+    fewer = max(1, current_max - 1) if current_max is not None else 1
+    more = current_max + 1 if current_max is not None else 2
+    fewer_disabled = " disabled" if unknown or current_max <= 1 else ""
+    more_disabled = " disabled" if unknown else ""
+    reason = " title='Slot limit is unavailable'" if unknown else ""
     return (
         "<form method=post action='/machines/slot-max' style='display:inline'>"
         f"<input type=hidden name=slot value='{esc(slot)}'>"
         f"<input type=hidden name=max value='{fewer}'>"
-        f"<button type=submit aria-label='Fewer slots'{fewer_disabled}>−</button></form>"
+        f"<button type=submit aria-label='Fewer slots'{fewer_disabled}{reason}>−</button></form>"
         "<form method=post action='/machines/slot-max' style='display:inline'>"
         f"<input type=hidden name=slot value='{esc(slot)}'>"
         f"<input type=hidden name=max value='{more}'>"
-        "<button type=submit aria-label='More slots'>+</button></form>"
+        f"<button type=submit aria-label='More slots'{more_disabled}{reason}>+</button></form>"
     )
 
 
@@ -2272,17 +2275,34 @@ def render_machines(
     if slot_status:
         body.append("<section class=machine-slots><h2>Fleet-wide capacity</h2>")
         body.append(
-            "<p class=dim>Each slot has one shared limit across all machines.</p>"
+            "<p class=dim>A slot limits how many callers can use that resource "
+            "at the same time, across all machines.</p>"
             "<div class=machine-slot-list>"
         )
         for slot_name, info in sorted(slot_status.items()):
-            used = info.get("holders", 0)
+            used = info.get("holders")
             slot_max = info.get("max")
-            controls = _slot_controls(slot_name, slot_max if slot_max is not None else 1)
+            used_label = esc(used) if used is not None else "?"
+            max_label = esc(slot_max) if slot_max is not None else "?"
+            controls = _slot_controls(slot_name, slot_max)
+            holder_names = info.get("holder_names")
+            if isinstance(holder_names, list) and holder_names:
+                holder_details = (
+                    "<span class=machine-slot-holders>Current holder IDs: "
+                    + ", ".join(f"<code>{esc(name)}</code>" for name in holder_names)
+                    + "</span>"
+                )
+            elif used == 0:
+                holder_details = "<span class=machine-slot-holders>No current holders</span>"
+            elif used is None:
+                holder_details = "<span class=machine-slot-holders>Holder count unavailable</span>"
+            else:
+                holder_details = "<span class=machine-slot-holders>Holder IDs unavailable</span>"
             body.append(
                 f"<div class=machine-slot><b>{esc(slot_name)}</b>"
-                f"<span class=mono>{esc(used)} / {esc(slot_max) if slot_max is not None else '-'}</span>"
-                f"<span class=slot-controls>{controls}</span></div>"
+                f"<span class=mono>{used_label} / {max_label}</span>"
+                f"<span class=slot-controls>{controls}</span>"
+                f"{holder_details}</div>"
             )
         body.append("</div></section>")
 
@@ -2353,7 +2373,7 @@ def render_machines(
 .machine-slots h2{margin:0 0 .25rem}
 .machine-slots>p{margin:.2rem 0 .65rem;font-size:13px}
 .machine-slot-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:.6rem}
-.machine-slot{display:flex;align-items:center;gap:.8rem;background:var(--surface);
+.machine-slot{display:flex;flex-wrap:wrap;align-items:center;gap:.55rem .8rem;background:var(--surface);
 border:1px solid var(--line);border-radius:12px;padding:.65rem .8rem}
 .slot-controls{display:flex;gap:4px}
 .slot-controls button{width:24px;height:24px;padding:0;border:1px solid var(--line);
@@ -2363,6 +2383,8 @@ border-radius:6px;background:var(--surface);color:var(--ink);cursor:pointer;font
 .machine-slot>b{flex:1;overflow-wrap:anywhere}
 .machine-slot .mono{font-size:13px;white-space:nowrap}
 .slot-controls{white-space:nowrap}
+.machine-slot-holders{flex:1 0 100%;min-width:0;overflow-wrap:anywhere;font-size:12px;color:var(--ink3)}
+.machine-slot-holders code{font:inherit;color:var(--ink2)}
 .machine-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}
 .machine-card{display:grid;gap:.7rem;align-content:start;background:var(--surface);
 border:1px solid var(--line);border-radius:18px;box-shadow:0 3px 0 var(--line);padding:1rem 1.1rem}
@@ -2370,7 +2392,8 @@ border:1px solid var(--line);border-radius:18px;box-shadow:0 3px 0 var(--line);p
 .machine-heading>b{font-size:16px;overflow-wrap:anywhere}
 .machine-dot{width:8px;height:8px;flex:none;border-radius:2px;background:var(--warn)}
 .machine-dot.online{background:var(--ok)}
-.machine-dot.draining{background:var(--warn)}
+.machine-dot.offline{background:var(--warn)}
+.machine-dot.draining{background:var(--lav);transform:rotate(45deg)}
 .machine-local,.machine-provider{font-size:12px;padding:1px 8px;border-radius:6px;
 background:var(--lavbg);color:var(--lav)}
 .machine-state{margin-left:auto;font-size:13px;color:var(--ink2)}
@@ -3405,7 +3428,7 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/machines":
             try:
                 records = machines.machines(self.fleet_connection, strict=True)
-                slot_status = slots_redis.status(**self.fleet_connection)
+                slot_status = slots_redis.status(include_holder_names=True, **self.fleet_connection)
                 timer_list = timers()
                 recurring_timer = next(
                     (timer for timer in timer_list if timer["unit"] == "delegation-loop.timer"),

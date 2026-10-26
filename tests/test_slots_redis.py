@@ -70,6 +70,23 @@ def test_status_json_matches_real_sorted_set_contents(redis_port, flush_redis, c
     assert set(raw.zrange("lupin:v1:slot:bmo", 0, -1)) == {"a", "b"}
 
 
+def test_status_can_report_only_live_holder_names(redis_port, flush_redis):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    slots_redis.acquire("bmo", "a", max_holders=2, **kw)
+    slots_redis.acquire("bmo", "b", **kw)
+    client = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    client.zadd(
+        f"{slots_redis.PREFIX}slot:bmo",
+        {"expired": slots_redis._now_ms() - 1},
+    )
+
+    status = slots_redis.status(include_holder_names=True, **kw)["bmo"]
+
+    assert status["holders"] == 2
+    assert status["max"] == 2
+    assert set(status["holder_names"]) == {"a", "b"}
+
+
 def test_set_max_overwrites_an_already_set_max(redis_port, flush_redis):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     slots_redis.acquire("bmo", "a", max_holders=2, **kw)
