@@ -301,7 +301,8 @@ quest decision isn't made against issue data that's badly stale.
 `<cache-key>` names which lookup, since the same repo backs several
 different queries that must not share one cache entry: `issues:<state>`
 (issue list), `comments:<state>` (per-issue comment pagination),
-`dependencies` (blockedBy/blocking links), `quests` (quest-labeled issues),
+`dependencies:v2` (roadmap blockedBy/blocking links with repository owners),
+`quests` (quest-labeled issues),
 `issue:<number>` (`place`'s single-issue lookup), `issue-state:<number>`
 (`roadmap_cli`'s blocker-exists check), `quest-locate-issue:<number>`
 (`quest`'s issue-to-repo lookup).

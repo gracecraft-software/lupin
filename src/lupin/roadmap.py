@@ -535,6 +535,10 @@ def build_model(
     ledger: list[dict],
     warnings: list[str] | None = None,
     repo: str = "",
+    *,
+    dependency_links: dict | None = None,
+    dependency_repo: str | None = None,
+    dependency_owner: str | None = None,
 ):
     issue_ids = {int(issue["number"]) for issue in issues}
 
@@ -587,6 +591,13 @@ def build_model(
 
 
     edges = {}
+    # Text can suggest a dependency. Only GitHub links create dependency edges.
+    possible_dependencies = {number: set() for number in issue_ids}
+
+    def add_possible_dependency(blocker: int, blocked: int) -> None:
+        if blocker != blocked and blocker > 0 and blocked in possible_dependencies:
+            possible_dependencies[blocked].add(blocker)
+
     for issue in issues:
         number = int(issue["number"])
         issue_labels = _label_names(issue)
@@ -602,30 +613,40 @@ def build_model(
                 parent = int(match.group(1))
                 parent_refs.add(parent)
                 _add_edge(edges, issue_ids, parent, number, "parent")
-            for match in re.finditer(r"\b(?:blocked by|waits for|requires|prerequisite(?:d)? by|depends on)\s+#(\d+)\b", text, re.IGNORECASE):
+            for match in re.finditer(
+                r"\b(?:blocked by|waits for|requires|prerequisite(?:d)? by|depends on)\s+#(\d+)\b",
+                text,
+                re.IGNORECASE,
+            ):
                 if inside_quote(text, match.start()):
                     continue
                 blocker = int(match.group(1))
                 tail = text[match.end() : match.end() + 32]
                 prefix = text[max(0, match.start() - 16) : match.start()]
-                negated = re.search(r"\b(?:not|isn'?t|doesn'?t|didn'?t|never)\s+$", prefix, re.IGNORECASE)
+                negated = re.search(
+                    r"\b(?:not|isn'?t|doesn'?t|didn'?t|never)\s+$",
+                    prefix,
+                    re.IGNORECASE,
+                )
                 if (
                     blocker not in parent_refs
                     and not negated
                     and not re.match(r"['’]s\s+(?:comment|thread|decision)", tail, re.IGNORECASE)
                 ):
-                    _add_edge(edges, issue_ids, blocker, number, "depends")
+                    add_possible_dependency(blocker, number)
             for match in re.finditer(r"\bblocks\s+#(\d+)\b", text, re.IGNORECASE):
                 if inside_quote(text, match.start()):
                     continue
                 line_start = text.rfind("\n", 0, match.start()) + 1
                 prefix = text[line_start : match.start()]
                 if not re.search(r"\bD\d+\b[^()\n]*\([^()\n]*$", prefix):
-                    _add_edge(edges, issue_ids, number, int(match.group(1)), "depends")
-            for match in re.finditer(r"#(\d+)\s+unblocks after\s+#(\d+)\s+lands", text, re.IGNORECASE):
+                    add_possible_dependency(number, int(match.group(1)))
+            for match in re.finditer(
+                r"#(\d+)\s+unblocks after\s+#(\d+)\s+lands", text, re.IGNORECASE
+            ):
                 if inside_quote(text, match.start()):
                     continue
-                _add_edge(edges, issue_ids, int(match.group(2)), int(match.group(1)), "depends")
+                add_possible_dependency(int(match.group(2)), int(match.group(1)))
             for start in re.finditer(r"\b(?:depends on|requires)\b", text, re.IGNORECASE):
                 if inside_quote(text, start.start()):
                     continue
@@ -640,24 +661,52 @@ def build_model(
                     if len(matches) == 1:
                         candidate_number = int(matches[0]["number"])
                         if not (number in decision_blocks and candidate_number in parent_refs):
-                            _add_edge(edges, issue_ids, candidate_number, number, "depends")
-            for line in text.splitlines():
-                if not any(char in line for char in "─←→"):
-                    continue
-                ids = [int(match.group(1)) for match in re.finditer(r"#(\d+)", line)]
-                if len(ids) < 2:
-                    continue
-                if "←" in line:
-                    _add_edge(edges, issue_ids, ids[-1], ids[0], "depends")
-                elif "+" in line[: line.rfind("─")]:
-                    for prerequisite in ids[:-1]:
-                        _add_edge(edges, issue_ids, prerequisite, ids[-1], "depends")
-                else:
-                    for index in range(1, len(ids)):
-                        _add_edge(edges, issue_ids, ids[index - 1], ids[index], "depends")
+                            add_possible_dependency(candidate_number, number)
+            offset = 0
+            for line in text.splitlines(keepends=True):
+                if any(char in line for char in "─←→") and not inside_quote(text, offset):
+                    ids = [int(match.group(1)) for match in re.finditer(r"#(\d+)", line)]
+                    if len(ids) >= 2:
+                        if "←" in line:
+                            add_possible_dependency(ids[-1], ids[0])
+                        elif "+" in line[: line.rfind("─")]:
+                            for prerequisite in ids[:-1]:
+                                add_possible_dependency(prerequisite, ids[-1])
+                        else:
+                            for index in range(1, len(ids)):
+                                add_possible_dependency(ids[index - 1], ids[index])
+                offset += len(line)
             if any(label.casefold() == "epic" for label in issue_labels):
                 for match in re.finditer(r"^\s*[-*]\s+#(\d+)\s+[—–-]", text, re.MULTILINE):
-                    _add_edge(edges, issue_ids, number, int(match.group(1)), "parent")
+                    if not inside_quote(text, match.start()):
+                        _add_edge(edges, issue_ids, number, int(match.group(1)), "parent")
+
+    if dependency_repo and dependency_owner:
+        same_repo = dependency_repo.casefold()
+        same_owner = dependency_owner.casefold()
+        for issue_number, links in (dependency_links or {}).items():
+            try:
+                issue_number = int(issue_number)
+            except (TypeError, ValueError):
+                continue
+            if issue_number not in issue_ids or not isinstance(links, dict):
+                continue
+            for blocker in links.get("blockedBy", []):
+                if (
+                    isinstance(blocker, dict)
+                    and str(blocker.get("repo") or "").casefold() == same_repo
+                    and str(blocker.get("owner") or "").casefold() == same_owner
+                    and isinstance(blocker.get("number"), int)
+                ):
+                    _add_edge(edges, issue_ids, blocker["number"], issue_number, "depends")
+            for target in links.get("blocking", []):
+                if (
+                    isinstance(target, dict)
+                    and str(target.get("repo") or "").casefold() == same_repo
+                    and str(target.get("owner") or "").casefold() == same_owner
+                    and isinstance(target.get("number"), int)
+                ):
+                    _add_edge(edges, issue_ids, issue_number, target["number"], "depends")
 
     for entry in ledger:
         if not isinstance(entry, dict) or not isinstance(entry.get("issue"), int):
@@ -678,6 +727,10 @@ def build_model(
         ):
             unresolved[int(issue["number"])] = match.group(1).strip()
 
+    confirmed_blockers = {}
+    for edge in edges.values():
+        if edge["kind"] == "depends":
+            confirmed_blockers.setdefault(edge["to"], set()).add(edge["from"])
     nodes = []
     for issue in issues:
         number = int(issue["number"])
@@ -706,6 +759,10 @@ def build_model(
                 "dispatched": isinstance(action, str) and action.casefold() in {"dispatch", "dispatched", "running"},  # Ledger claims in-flight; see disclaimer below (not live-process verification).
                 "decision": decision_blocks.get(number),
                 "unresolvedDependency": unresolved.get(number),
+                "possibleDependencies": sorted(
+                    possible_dependencies[number]
+                    - confirmed_blockers.get(number, set())
+                ),
                 "files": sorted(set(SOURCE_PATH.findall(issue.get("body") or ""))),
                 "comments": [
                     _comment_details(comment)
@@ -718,7 +775,7 @@ def build_model(
     open_dependencies = {edge["to"] for edge in edges.values() if edge["kind"] == "depends"}
 
     def held(node):
-        return node["decision"] or node["unresolvedDependency"] or any(
+        return node["decision"] or any(
             label.casefold() in {"owner-todo", "needs-decision", "completely-blocked-on-human", "epic"}
             for label in node["labels"]
         )
@@ -806,6 +863,7 @@ def build_model(
         "targetDispatches": 2,
         "handoffStatus": handoff_status,
         "acyclic": _acyclic(issue_ids, edge_list),
+        "dependencyStatus": "available" if dependency_links is not None else "unavailable",
         "warnings": list(warnings or []),
         "generatedAt": time.time(),
     }
@@ -953,15 +1011,14 @@ def load_github(repo_path: str, state: str = "open", *, connection: dict | None 
 # `closedByPullRequestsReferences` only links an issue to the PR that closes
 # it (not to another issue), and a cross-reference timeline event just means
 # one issue mentioned another -- no more reliable than the text search this
-# was meant to replace. A raw query (not `gh issue list --json`, which does
-# not expose the linked issue's repo) confirms each blockedBy/blocking node
-# carries `repository{name}`, which is what makes cross-repo edges possible.
+# was meant to replace. The GraphQL query includes `repository{name owner{login}}`
+# so the dashboard can reject links to a repo with the same name elsewhere.
 DEPENDENCY_GRAPHQL = (
     "query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){"
     "issues(first:100,after:$cursor,states:OPEN,orderBy:{field:UPDATED_AT,direction:DESC}){"
     "nodes{number "
-    "blockedBy(first:25){nodes{number repository{name}}} "
-    "blocking(first:25){nodes{number repository{name}}}"
+    "blockedBy(first:25){nodes{number repository{name owner{login}}}} "
+    "blocking(first:25){nodes{number repository{name owner{login}}}}"
     "} pageInfo{hasNextPage endCursor}}}}"
 )
 
@@ -977,17 +1034,20 @@ def _dependency_targets(issue: dict, key: str) -> list[dict]:
             continue
         repository = target.get("repository")
         repo_name = repository.get("name") if isinstance(repository, dict) else None
+        repo_owner = repository.get("owner") if isinstance(repository, dict) else None
+        owner_login = repo_owner.get("login") if isinstance(repo_owner, dict) else None
         if repo_name:
-            targets.append({"repo": repo_name, "number": target["number"]})
+            targets.append(
+                {"repo": repo_name, "owner": owner_login, "number": target["number"]}
+            )
     return targets
 
 
 def _read_dependencies(repo_path: str, owner: str, name: str, *, connection: dict | None = None):
     """Read every open issue's blockedBy/blocking links, with pagination.
 
-    Returns (links, error). links maps issue number -> {"blockedBy": [...],
-    "blocking": [...]}, each a list of {"repo", "number"} -- the repo name
-    travels with the link, so a target in another repo is still usable.
+    Returns (links, error). Each issue maps to blockedBy/blocking lists of
+    {"repo", "owner", "number"} records.
 
     Goes through `gh_cache.cached_gh_json` (issue #35) -- only
     the canonical fetcher (`LUPIN_GH_CANONICAL_FETCHER`) runs the loop below on a cache miss.
@@ -1038,7 +1098,9 @@ def _read_dependencies(repo_path: str, owner: str, name: str, *, connection: dic
             if not cursor:
                 return links, "GitHub returned incomplete pagination data"
 
-    links, error = gh_cache.cached_gh_json(owner, name, "dependencies", _fetch, connection=connection)
+    links, error = gh_cache.cached_gh_json(
+        owner, name, "dependencies:v2", _fetch, connection=connection
+    )
     # Same JSON-stringifies-int-keys fix as `_read_comments` above.
     if isinstance(links, dict):
         links = {int(number): value for number, value in links.items()}
@@ -1046,9 +1108,7 @@ def _read_dependencies(repo_path: str, owner: str, name: str, *, connection: dic
 
 
 def load_dependencies(repo_path: str, *, connection: dict | None = None):
-    """Return (links, warnings) -- links is `_read_dependencies`'s result
-    for the repo checked out at repo_path, or {} with a warning on failure.
-    """
+    """Return (links, warnings) for the repo checked out at repo_path."""
     warnings = []
     owner, name, error = _repo_identity(repo_path)
     links = {}
@@ -1059,13 +1119,25 @@ def load_dependencies(repo_path: str, *, connection: dict | None = None):
         if error:
             warnings.append(f"GitHub dependency links are unavailable: {error}")
             links = links or {}
+        elif any(
+            isinstance(target, dict) and not target.get("owner")
+            for issue_links in (links or {}).values()
+            if isinstance(issue_links, dict)
+            for relation in ("blockedBy", "blocking")
+            for target in issue_links.get(relation, [])
+        ):
+            warnings.append(
+                "GitHub dependency links are unavailable: a linked repository has no owner"
+            )
     return links, warnings
 
 
 _DEPENDENCY_CACHE = {}
 
 
-def cached_dependencies(repo: str, repo_path: str):
+def cached_dependencies(
+    repo: str, repo_path: str, *, connection: dict | None = None
+):
     """Cached `load_dependencies`, same lifetime as `cached_github`.
 
     Kept in memory only (not written to the disk cache file): the disk
@@ -1073,16 +1145,14 @@ def cached_dependencies(repo: str, repo_path: str):
     and this cache is keyed by issue number -- not worth the mismatch risk
     for data that is cheap to refetch within one `serve` run.
 
-    Does not take a `connection` override -- `load_dependencies` resolves
-    the fleet's Redis location itself (see `gh_cache.cached_gh_json`), so
-    there is nothing for a caller at this level to supply.
+    Uses the optional Redis connection override passed by the server.
     """
     now = time.monotonic()
     with _CACHE_LOCK:
         cached = _DEPENDENCY_CACHE.get(repo)
         if cached and now - cached[0] < GITHUB_CACHE_SECONDS:
             return cached[1]
-        data = load_dependencies(repo_path)
+        data = load_dependencies(repo_path, connection=connection)
         _DEPENDENCY_CACHE[repo] = (time.monotonic(), data)
         return data
 
@@ -1159,8 +1229,14 @@ def build_dependency_dag(repo_links: dict[str, dict[int, dict]]) -> dict:
         repo: [
             {
                 "number": number,
-                "blockedBy": list(links.get("blockedBy", [])),
-                "blocking": list(links.get("blocking", [])),
+                "blockedBy": [
+                    {"repo": target["repo"], "number": target["number"]}
+                    for target in links.get("blockedBy", [])
+                ],
+                "blocking": [
+                    {"repo": target["repo"], "number": target["number"]}
+                    for target in links.get("blocking", [])
+                ],
             }
             for number, links in sorted(issues.items())
         ]
@@ -1196,7 +1272,17 @@ def load_model(repo: str, repo_path: str, *, connection: dict | None = None):
     ledger, ledger_error = _read_ledger(repo_path, connection=connection)
     if ledger_error:
         warnings.append(ledger_error)
-    model = build_model(issues, comments, ledger, warnings, repo)
+    dependency_links, dependency_warnings = cached_dependencies(repo, repo_path)
+    warnings.extend(warning for warning in dependency_warnings if warning not in warnings)
+    if dependency_warnings:
+        dependency_links = None
+    dependency_owner, dependency_repo, _identity_error = _repo_identity(repo_path)
+    model = build_model(
+        issues, comments, ledger, warnings, repo,
+        dependency_links=dependency_links,
+        dependency_repo=dependency_repo,
+        dependency_owner=dependency_owner,
+    )
     model["repo"] = repo
     return model
 
@@ -1277,7 +1363,19 @@ def cached_model(
     warnings = list(warnings)
     if ledger_error:
         warnings.append(ledger_error)
-    model = build_model(issues, comments, ledger, warnings, repo)
+    dependency_links, dependency_warnings = cached_dependencies(
+        repo, repo_path, connection=connection
+    )
+    warnings.extend(warning for warning in dependency_warnings if warning not in warnings)
+    if dependency_warnings:
+        dependency_links = None
+    dependency_owner, dependency_repo, _identity_error = _repo_identity(repo_path)
+    model = build_model(
+        issues, comments, ledger, warnings, repo,
+        dependency_links=dependency_links,
+        dependency_repo=dependency_repo,
+        dependency_owner=dependency_owner,
+    )
     model["repo"] = repo
     return model
 
@@ -1496,6 +1594,13 @@ CROSS_REPO_EDGE_NOTE = (
     "Cross-repo references are not tracked."
 )
 
+def _dependency_status_note(model: dict) -> str:
+    if model.get("dependencyStatus") != "available":
+        return "Dependency links are unavailable."
+    if not any(edge["kind"] == "depends" for edge in model.get("edges", [])):
+        return "No confirmed dependency links."
+    return ""
+
 
 def _render_queue_graph_svg(repo: str, model: dict) -> str:
     """Build the per-repo dependency graph as an <svg> string."""
@@ -1559,8 +1664,8 @@ def _render_queue_graph_svg(repo: str, model: dict) -> str:
                 badge += f" · {node['loop'][:9]}"
             if node.get("decision"):
                 badge += f" · {node['decision']}"
-            elif node.get("unresolvedDependency"):
-                badge += " · blocker unknown"
+            elif node.get("unresolvedDependency") or node.get("possibleDependencies"):
+                badge += " · possible dependency"
             if any(label.casefold() == "needs-expert-decision" for label in node["labels"]):
                 badge += " · needs expert decision"
             svg.append(_svg_text(x + 10, y + 17, badge, 11, 700))
@@ -2037,9 +2142,26 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
                 f"#{other_number} {html.escape(other['title'])}</a>"
                 f"<span>{html.escape(page_stage(other_number))}</span></li>"
             )
+        dependency_note = _dependency_status_note(model)
+        dependency_note_html = (
+            f"<p class='dim roadmap-dependency-note'>{html.escape(dependency_note)}</p>"
+            if dependency_note
+            else ""
+        )
+        possible_notes = [
+            f"<p class='dim roadmap-possible-dependency'>Possible dependency on #{number}; "
+            "not confirmed or used as a blocker.</p>"
+            for number in chosen.get("possibleDependencies", [])
+        ]
+        if chosen.get("unresolvedDependency"):
+            possible_notes.append(
+                "<p class='dim roadmap-possible-dependency'>Possible dependency on "
+                f"{html.escape(str(chosen['unresolvedDependency']))}; "
+                "not confirmed or used as a blocker.</p>"
+            )
         relations = (
-            f"<section class='roadmap-relations'><h3>Relations</h3><ul>{''.join(relation_rows)}</ul></section>"
-            if relation_rows else ""
+            f"<section class='roadmap-relations'><h3>Relations</h3>{dependency_note_html}"
+            f"{''.join(possible_notes)}<ul>{''.join(relation_rows)}</ul></section>"
         )
         details = render_issue_details(chosen).replace("<details class='issue-details'", "<details open class='issue-details'", 1)
         stage = page_stage(chosen["number"])
@@ -2151,6 +2273,12 @@ def render_page(
 
     issue_map = {node["number"]: node for node in model["nodes"]}
     svg = _render_queue_graph_svg(repo, model)
+    dependency_note = _dependency_status_note(model)
+    dependency_note_html = (
+        f"<p class='dim roadmap-dependency-status'>{html.escape(dependency_note)}</p>"
+        if dependency_note
+        else ""
+    )
 
     warnings = "".join(warning_card(message) for message in model["warnings"])
     if not model["acyclic"]:
@@ -2226,8 +2354,8 @@ def render_page(
         f"<span class='pill'>{len(model['batch'])} {STAGE_READY.lower()}</span>{handoff_fact}</div>"
         f"{_render_quest_section(repo, quest_state)}"
         f"{warnings}<h2>Issue roadmap</h2>"
-        "<p class='dim'>Line key: solid lines show dependencies; dashed lines show parent or split links. Cards link to GitHub.</p>"
-        f"<div class='queue-scroll'>{svg}</div>"
+        "<p class='dim'>Line key: solid lines show confirmed dependencies; dashed lines show parent or split links. Cards link to GitHub.</p>"
+        f"{dependency_note_html}<div class='queue-scroll'>{svg}</div>"
         f"<p class='dim'>{STAGE_NOTE}</p>"
         f"{owner_blocked_html}"
         "<h2>Issue details and recent activity</h2>"

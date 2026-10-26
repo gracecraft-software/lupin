@@ -20,6 +20,29 @@ class RoadmapTests(unittest.TestCase):
         cache_patch.start()
         self.addCleanup(cache_patch.stop)
         roadmap._GITHUB_CACHE.clear()
+        roadmap._DEPENDENCY_CACHE.clear()
+
+
+    def test_cached_model_uses_confirmed_dependency_links(self):
+        issues = [
+            {"number": 16, "title": "Promo data", "body": "", "labels": ["priority/P1"]},
+            {"number": 18, "title": "Use promo data", "body": "", "labels": ["priority/P3"]},
+        ]
+        links = {
+            18: {"blockedBy": [{"repo": "lupin", "owner": "acme", "number": 16}], "blocking": []}
+        }
+        with (
+            mock.patch.object(roadmap, "load_github", return_value=(issues, {}, [])),
+            mock.patch.object(roadmap, "cached_dependencies", return_value=(links, [])) as fetch,
+            mock.patch.object(roadmap, "_read_ledger", return_value=([], None)),
+            mock.patch.object(roadmap, "_repo_identity", return_value=("acme", "lupin", None)),
+        ):
+            model = roadmap.cached_model("lupin", "/repo")
+
+        fetch.assert_called_once_with("lupin", "/repo", connection=None)
+        self.assertIn({"from": 16, "to": 18, "kind": "depends"}, model["edges"])
+        stages = {stage["name"]: stage["numbers"] for stage in model["stages"]}
+        self.assertIn(18, stages["Blocked or held"])
 
     def test_normalizes_priority_and_size_labels(self):
         issues = [
@@ -37,24 +60,131 @@ class RoadmapTests(unittest.TestCase):
         self.assertEqual(node["priority"], "P1")
         self.assertEqual(node["size"], "size-m")
 
-    def test_parent_and_dependency_links_remain_distinct(self):
+    def test_prose_dependency_note_does_not_block_the_issue(self):
         issues = [
-            {"number": 1, "title": "Parent", "body": "", "labels": ["epic"]},
+            {"number": 16, "title": "Promo data", "body": "", "labels": ["priority/P1"]},
             {
-                "number": 2,
-                "title": "Child",
-                "body": "Part of #1. Depends on #3.",
-                "labels": [],
+                "number": 18,
+                "title": "Use promo data",
+                "body": "Depends on #16.",
+                "labels": ["priority/P3"],
             },
-            {"number": 3, "title": "Prerequisite", "body": "", "labels": []},
+        ]
+        dependency_links = {
+            number: {"blockedBy": [], "blocking": []} for number in (16, 18)
+        }
+
+        model = roadmap.build_model(
+            issues,
+            {},
+            [],
+            repo="lupin",
+            dependency_links=dependency_links,
+            dependency_repo="lupin",
+        )
+
+        stages = {stage["name"]: stage["numbers"] for stage in model["stages"]}
+        nodes = {node["number"]: node for node in model["nodes"]}
+        self.assertEqual(model["edges"], [])
+        self.assertEqual(nodes[18]["possibleDependencies"], [16])
+        self.assertNotIn(18, stages["Blocked or held"])
+        self.assertTrue(model["acyclic"])
+
+    def test_confirmed_github_dependency_blocks_the_issue(self):
+        issues = [
+            {"number": 16, "title": "Promo data", "body": "", "labels": ["priority/P1"]},
+            {
+                "number": 18,
+                "title": "Use promo data",
+                "body": "Depends on #16.",
+                "labels": ["priority/P3"],
+            },
+        ]
+        dependency_links = {
+            16: {"blockedBy": [], "blocking": [{"repo": "lupin", "owner": "acme", "number": 18}]},
+            18: {"blockedBy": [{"repo": "lupin", "owner": "acme", "number": 16}], "blocking": []},
+        }
+
+        model = roadmap.build_model(
+            issues,
+            {},
+            [],
+            repo="lupin",
+            dependency_links=dependency_links,
+            dependency_repo="lupin",
+            dependency_owner="acme",
+        )
+
+        stages = {stage["name"]: stage["numbers"] for stage in model["stages"]}
+        nodes = {node["number"]: node for node in model["nodes"]}
+        self.assertEqual(model["edges"], [{"from": 16, "to": 18, "kind": "depends"}])
+        self.assertIn(18, stages["Blocked or held"])
+        self.assertEqual(nodes[18]["possibleDependencies"], [])
+
+    def test_cross_repo_github_dependency_is_not_a_dashboard_edge(self):
+        issues = [
+            {"number": 16, "title": "Other repo issue", "body": "", "labels": []},
+            {"number": 18, "title": "Local issue", "body": "", "labels": []},
         ]
 
-        edges = roadmap.build_model(issues, {}, [], repo="nix")["edges"]
+        model = roadmap.build_model(
+            issues,
+            {},
+            [],
+            repo="lupin",
+            dependency_links={
+                18: {
+                    "blockedBy": [{"repo": "lupin", "owner": "other", "number": 16}],
+                }
+            },
+            dependency_owner="acme",
+            dependency_repo="lupin",
+        )
 
-        self.assertIn({"from": 1, "to": 2, "kind": "parent"}, edges)
-        self.assertIn({"from": 3, "to": 2, "kind": "depends"}, edges)
+        self.assertEqual(model["edges"], [])
+        self.assertTrue(model["acyclic"])
 
-    def test_negated_dependency_phrase_creates_no_edge(self):
+    def test_prose_dependency_cycle_does_not_change_cycle_detection(self):
+        issues = [
+            {"number": 16, "title": "A", "body": "Depends on #18.", "labels": []},
+            {"number": 18, "title": "B", "body": "Depends on #16.", "labels": []},
+        ]
+        dependency_links = {
+            number: {"blockedBy": [], "blocking": []} for number in (16, 18)
+        }
+
+        model = roadmap.build_model(
+            issues,
+            {},
+            [],
+            repo="lupin",
+            dependency_links=dependency_links,
+            dependency_repo="lupin",
+        )
+
+        self.assertEqual(model["edges"], [])
+        self.assertTrue(model["acyclic"])
+
+    def test_parent_and_split_relations_remain_edges(self):
+        issues = [
+            {"number": 1, "title": "Parent", "body": "", "labels": ["epic"]},
+            {"number": 2, "title": "Child", "body": "Part of #1.", "labels": []},
+        ]
+        links = {number: {"blockedBy": [], "blocking": []} for number in (1, 2)}
+
+        model = roadmap.build_model(
+            issues,
+            {},
+            [{"issue": 1, "children": [2]}],
+            repo="lupin",
+            dependency_links=links,
+            dependency_repo="lupin",
+        )
+
+        self.assertIn({"from": 1, "to": 2, "kind": "parent"}, model["edges"])
+        self.assertIn({"from": 1, "to": 2, "kind": "split"}, model["edges"])
+
+    def test_negated_dependency_phrase_is_not_a_possible_note(self):
         issues = [
             {"number": 77, "title": "A", "body": "", "labels": []},
             {
@@ -64,15 +194,22 @@ class RoadmapTests(unittest.TestCase):
                 "labels": [],
             },
         ]
+        links = {number: {"blockedBy": [], "blocking": []} for number in (77, 79)}
 
-        edges = roadmap.build_model(issues, {}, [], repo="nix")["edges"]
+        model = roadmap.build_model(
+            issues,
+            {},
+            [],
+            repo="nix",
+            dependency_links=links,
+            dependency_repo="nix",
+        )
 
-        # The negated mention must not create an edge; the real one still does.
-        matches = [e for e in edges if e == {"from": 77, "to": 79, "kind": "depends"}]
-        self.assertEqual(len(matches), 1)
+        nodes = {node["number"]: node for node in model["nodes"]}
+        self.assertEqual(model["edges"], [])
+        self.assertEqual(nodes[79]["possibleDependencies"], [77])
 
-
-    def test_quoted_dependency_phrase_creates_no_edge(self):
+    def test_quoted_dependency_phrase_creates_no_note_or_edge(self):
         issues = [
             {"number": 77, "title": "Original", "body": "", "labels": []},
             {"number": 78, "title": "Blocked issue", "body": "", "labels": []},
@@ -84,12 +221,23 @@ class RoadmapTests(unittest.TestCase):
                 "labels": [],
             },
         ]
+        links = {
+            number: {"blockedBy": [], "blocking": []}
+            for number in (77, 78, 79, 158)
+        }
 
-        edges = roadmap.build_model(issues, {}, [], repo="nix")["edges"]
-
-        self.assertFalse(
-            any(edge["from"] == 158 or edge["to"] == 158 for edge in edges)
+        model = roadmap.build_model(
+            issues,
+            {},
+            [],
+            repo="nix",
+            dependency_links=links,
+            dependency_repo="nix",
         )
+
+        nodes = {node["number"]: node for node in model["nodes"]}
+        self.assertFalse(any(edge["from"] == 158 or edge["to"] == 158 for edge in model["edges"]))
+        self.assertEqual(nodes[158]["possibleDependencies"], [])
 
     def test_dispatch_ledger_event_marks_issue_active(self):
         issue = {"number": 12, "title": "Running", "body": "", "labels": []}
@@ -799,11 +947,100 @@ class RoadmapTests(unittest.TestCase):
             ["alpha"], {"alpha": model}, render
         )
 
-        self.assertIn("Line key: solid lines show dependencies", repo_page)
+        self.assertIn("Line key: solid lines show confirmed dependencies", repo_page)
         self.assertIn("dashed lines show parent or split links", repo_page)
         self.assertIn("Ready: the loop can take this issue next.", board_page)
         self.assertIn("In progress: the loop sent this issue to a machine.", board_page)
         self.assertIn("<h2>Ready</h2>", board_page)
+
+    def test_board_shows_possible_prose_note_without_blocking(self):
+        issues = [
+            {"number": 16, "title": "Promo data", "body": "", "labels": ["priority/P1"]},
+            {
+                "number": 18,
+                "title": "Use promo data",
+                "body": "Depends on #16.",
+                "labels": ["priority/P3"],
+            },
+        ]
+        links = {number: {"blockedBy": [], "blocking": []} for number in (16, 18)}
+        model = roadmap.build_model(
+            issues,
+            {},
+            [],
+            repo="alpha",
+            dependency_links=links,
+            dependency_repo="alpha",
+        )
+        render = lambda title, body, css, js: body
+
+        board = roadmap.render_combined_page(
+            ["alpha"],
+            {"alpha": model},
+            render,
+            {"repo": "alpha", "issue": "18", "issue_repo": "alpha"},
+        )
+
+        self.assertIn("Possible dependency on #16; not confirmed or used as a blocker.", board)
+        self.assertIn("No confirmed dependency links.", board)
+        self.assertIn("Later", board)
+        self.assertNotIn("blocked by #16", board)
+
+    def test_board_shows_confirmed_dependency_relation(self):
+        issues = [
+            {"number": 16, "title": "Promo data", "body": "", "labels": ["priority/P1"]},
+            {"number": 18, "title": "Use promo data", "body": "", "labels": ["priority/P3"]},
+        ]
+        model = roadmap.build_model(
+            issues,
+            {},
+            [],
+            repo="alpha",
+            dependency_links={
+                18: {"blockedBy": [{"repo": "alpha", "owner": "acme", "number": 16}], "blocking": []}
+            },
+            dependency_repo="alpha",
+            dependency_owner="acme",
+        )
+        render = lambda title, body, css, js: body
+
+        board = roadmap.render_combined_page(
+            ["alpha"],
+            {"alpha": model},
+            render,
+            {"repo": "alpha", "issue": "18", "issue_repo": "alpha"},
+        )
+
+        self.assertIn("blocked by", board)
+        self.assertIn("#16 Promo data", board)
+        self.assertIn("Blocked", board)
+        self.assertNotIn("No confirmed dependency links.", board)
+
+    def test_board_distinguishes_unavailable_dependencies_from_zero_links(self):
+        issues = [{"number": 18, "title": "Use promo data", "body": "", "labels": []}]
+        model = roadmap.build_model(
+            issues,
+            {},
+            [],
+            warnings=["GitHub dependency links are unavailable: fixture failure"],
+            repo="alpha",
+            dependency_links=None,
+            dependency_repo="alpha",
+        )
+        render = lambda title, body, css, js: body
+
+        board = roadmap.render_combined_page(
+            ["alpha"],
+            {"alpha": model},
+            render,
+            {"repo": "alpha", "issue": "18", "issue_repo": "alpha"},
+        )
+
+        self.assertIn("Dependency links are unavailable.", board)
+        self.assertNotIn("No confirmed dependency links.", board)
+        self.assertIn("fixture failure", board)
+
+
     def test_saved_filters_and_manual_queue_order_render_for_open_eligible_issues(self):
         issues = [
             {
@@ -1549,7 +1786,7 @@ class DependencyDagTests(unittest.TestCase):
                             {
                                 "number": 10,
                                 "blockedBy": {
-                                    "nodes": [{"number": 3, "repository": {"name": "core"}}]
+                                    "nodes": [{"number": 3, "repository": {"name": "core", "owner": {"login": "acme"}}}]
                                 },
                                 "blocking": {"nodes": []},
                             }
@@ -1570,7 +1807,90 @@ class DependencyDagTests(unittest.TestCase):
 
         self.assertIsNone(error)
         self.assertEqual(
-            links, {10: {"blockedBy": [{"repo": "core", "number": 3}], "blocking": []}}
+            links,
+            {
+                10: {
+                    "blockedBy": [{"repo": "core", "owner": "acme", "number": 3}],
+                    "blocking": [],
+                }
+            },
+        )
+        self.assertIn("owner{login}", roadmap.DEPENDENCY_GRAPHQL)
+
+    def test_cached_model_uses_redis_connection_for_versioned_dependencies(self):
+        issues = [
+            {"number": 3, "title": "Blocker", "body": "", "labels": []},
+            {"number": 10, "title": "Blocked", "body": "", "labels": []},
+        ]
+        response = {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": [
+                            {
+                                "number": 10,
+                                "blockedBy": {
+                                    "nodes": [
+                                        {
+                                            "number": 3,
+                                            "repository": {
+                                                "name": "api",
+                                                "owner": {"login": "acme"},
+                                            },
+                                        }
+                                    ]
+                                },
+                                "blocking": {"nodes": []},
+                            },
+                            {
+                                "number": 3,
+                                "blockedBy": {"nodes": []},
+                                "blocking": {"nodes": []},
+                            },
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        }
+        connection = {"redis_host": "redis.example", "redis_port": 6380}
+
+        with (
+            mock.patch.object(
+                roadmap, "cached_github", return_value=(issues, {}, [])
+            ),
+            mock.patch.object(roadmap, "_read_ledger", return_value=([], None)),
+            mock.patch.object(
+                roadmap, "_repo_identity", return_value=("acme", "api", None)
+            ),
+            mock.patch.object(roadmap, "_run_json", return_value=(response, None)),
+            mock.patch.object(
+                roadmap.gh_cache,
+                "cached_gh_json",
+                side_effect=lambda *args, **_kwargs: args[3](),
+            ) as cached_gh_json,
+        ):
+            model = roadmap.cached_model("api", "/repo", connection=connection)
+
+        args, kwargs = cached_gh_json.call_args
+        self.assertEqual(args[:3], ("acme", "api", "dependencies:v2"))
+        self.assertEqual(kwargs["connection"], connection)
+        self.assertIn({"from": 3, "to": 10, "kind": "depends"}, model["edges"])
+
+    def test_load_dependencies_warns_when_a_link_has_no_owner(self):
+        links = {
+            10: {"blockedBy": [{"repo": "core", "number": 3}], "blocking": []}
+        }
+        with (
+            mock.patch.object(roadmap, "_repo_identity", return_value=("acme", "api", None)),
+            mock.patch.object(roadmap, "_read_dependencies", return_value=(links, None)),
+        ):
+            result, warnings = roadmap.load_dependencies("/repo")
+
+        self.assertEqual(result, links)
+        self.assertEqual(
+            warnings,
+            ["GitHub dependency links are unavailable: a linked repository has no owner"],
         )
 
     def test_cached_dependency_dag_combines_repos_and_surfaces_warnings(self):
@@ -1602,6 +1922,7 @@ def test_roadmap_reads_latest_shared_events(redis_port, flush_redis, monkeypatch
         roadmap, "cached_github", lambda *args, **kwargs: (issues, {}, [])
     )
     monkeypatch.setattr(roadmap, "_repo_identity", lambda _path: ("acme", "repo", None))
+    monkeypatch.setattr(roadmap, "cached_dependencies", lambda *_args, **_kwargs: ({}, []))
 
     before = roadmap.cached_model("repo", "/repo", connection=connection)
     ledger.append_event(
@@ -1671,6 +1992,7 @@ def test_roadmap_ignores_local_ledger_history_and_empty_stream(
         roadmap, "cached_github", lambda *args, **kwargs: ([issue], {}, [])
     )
     monkeypatch.setattr(roadmap, "_repo_identity", lambda _path: ("acme", "repo", None))
+    monkeypatch.setattr(roadmap, "cached_dependencies", lambda *_args, **_kwargs: ({}, []))
 
     model = roadmap.cached_model("repo", str(tmp_path), connection=connection)
 
@@ -1688,6 +2010,7 @@ def test_roadmap_shows_empty_ledger_on_unavailable_coordinator(
         roadmap, "cached_github", lambda *args, **kwargs: ([issue], {}, [])
     )
     monkeypatch.setattr(roadmap, "_repo_identity", lambda _path: ("acme", "repo", None))
+    monkeypatch.setattr(roadmap, "cached_dependencies", lambda *_args, **_kwargs: ({}, []))
 
     model = roadmap.cached_model(
         "repo", "/repo",
