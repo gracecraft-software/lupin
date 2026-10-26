@@ -15,6 +15,7 @@ All notable changes to Lupin. The version has one source:
 - The Roadmap board shows stage tabs with counts, like the List view.
 - The triage skill checks issue details and linked open PRs before it reports
   likely duplicates.
+- The `ux-pressure-test` skill checks accessibility, performance, and resilience.
 
 ### Changed
 

@@ -96,9 +96,9 @@ Include all relevant items, such as:
   it.
 - Supported screen sizes, orientation changes, and browsers. Every journey
   runs on all three device sizes. See "Run the three device passes".
-- Keyboard focus and visible focus, labels and instructions, zoom, and other
-  access needs that affect the journey. Name assistive tools that were actually
-  used; do not claim a screen-reader check from keyboard testing alone.
+- Use `ux-pressure-test` for accessibility, performance, and resilience checks.
+  Name assistive tools only when you used them; keyboard checks are not a
+  screen-reader test.
 
 Create a coverage table before dispatch. Give every planned journey and
 variation a status: `not started`, `passed`, `finding`, `blocked`, or `not run`.
