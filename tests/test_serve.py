@@ -1578,7 +1578,9 @@ def test_roadmap_page_warns_about_unreadable_machine_record(redis_port, flush_re
             status = response.status
             body = response.read().decode()
     assert status == 200
-    assert "1 of 1 machines" in body
+    status_row = body.split("<div class=dashboard-status", 1)[1].split("</div>", 1)[0]
+    assert "1 of 2 machines available · incomplete" in status_row
+    assert "dashboard-status-value status-warn" in status_row
     assert "warning: skipped unreadable Redis record(s): machine:bad" in body
 
 
@@ -1657,6 +1659,7 @@ def test_roadmap_route_reads_ledger_from_dashboard_connection(
     assert status == 200
     assert "Shared handoff." in body
     assert "Visible from dashboard." in body
+    assert "class=dashboard-status" not in body
 
 
 def test_roadmap_defaults_to_list_for_large_backlogs(
@@ -1803,6 +1806,14 @@ def test_roadmap_full_query_renders_the_whole_page_without_javascript(
             serve, "code_repos", return_value=[{"repo": "widgets", "loopable": True}]
         ),
         mock.patch.object(roadmap, "cached_combined_model", return_value=model),
+        mock.patch.object(
+            serve.machines, "machines", return_value=[{"state": "online"}]
+        ),
+        mock.patch.object(
+            serve,
+            "timers",
+            return_value=[{"unit": "delegation-loop.timer", "next": 1_800_000_000}],
+        ),
         _live_dashboard(connection) as port,
     ):
         with urllib.request.urlopen(
@@ -1813,6 +1824,8 @@ def test_roadmap_full_query_renders_the_whole_page_without_javascript(
     assert body.startswith("<!doctype html>")
     assert "Whole page card" in body
     assert "roadmap-fragment" not in body
+    assert "class=dashboard-status role=group" in body
+    assert "Updated" in body
 
 
 def test_roadmap_shows_why_a_repo_has_no_issues(redis_port, flush_redis):
@@ -4430,6 +4443,35 @@ def test_evidence_route_refuses_with_404_over_http(tmp_path, monkeypatch, query)
     assert refused.value.code == 404
 
 
+def test_missing_debrief_404_skips_dashboard_status_reads(tmp_path, monkeypatch):
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    with (
+        mock.patch.object(serve.digest, "read_one", return_value=None),
+        mock.patch.object(
+            serve.machines,
+            "machines",
+            side_effect=AssertionError("error response read machine data"),
+        ) as machine_read,
+        mock.patch.object(
+            serve,
+            "timers",
+            side_effect=AssertionError("error response read timer data"),
+        ) as timer_read,
+        _live_dashboard({}) as port,
+    ):
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/debrief?repo=widgets&file=missing.md",
+                timeout=15,
+            )
+        body = refused.value.read()
+
+    assert refused.value.code == 404
+    assert b"no such debrief" in body
+    machine_read.assert_not_called()
+    timer_read.assert_not_called()
+
+
 DEBRIEF_SHOT_REL = "20261010-120000-6h-screenshots/debrief.png"
 
 
@@ -4642,3 +4684,185 @@ def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_s
 
     assert "no digest" not in index.reply.call_args.args[0].decode()
     assert "This is a record" in page.reply.call_args.args[0].decode()
+
+
+class DashboardStatusTests(unittest.TestCase):
+    def _reply_page(self, active: str, status_data: dict | None = None) -> str:
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.fleet_connection = {}
+        if status_data is not None:
+            handler.dashboard_status_data = status_data
+        handler.wfile = io.BytesIO()
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        body = serve.page("Synthetic", "<p>SYNTHETIC TEST DATA ONLY</p>", active=active)
+        serve.Handler.reply(handler, body)
+        return handler.wfile.getvalue().decode()
+
+    @staticmethod
+    def _status_fragment(response: str) -> str:
+        return response.split("<div class=dashboard-status", 1)[1].split("</div>", 1)[0]
+
+    def test_shared_status_appears_on_mockup_pages(self):
+        records = [{"state": "online"}]
+        scheduled = [{"unit": "delegation-loop.timer", "next": 1_800_000_000}]
+        pages = ("overview", "usage", "loops", "schedule", "repos", "roadmap", "models")
+        with (
+            mock.patch.object(serve.machines, "machines", return_value=records),
+            mock.patch.object(serve, "timers", return_value=scheduled),
+            mock.patch.object(serve.time, "time", return_value=1_700_000_000),
+        ):
+            for active in pages:
+                with self.subTest(active=active):
+                    response = self._reply_page(active)
+                    status = self._status_fragment(response)
+                    self.assertIn("1 of 1 machines available", status)
+                    self.assertIn("data-until='1800000000'", status)
+                    self.assertIn("Updated", status)
+                    self.assertEqual(response.count("class=dashboard-status role=group"), 1)
+            self.assertNotIn(
+                "class=dashboard-status role=group", self._reply_page("machines")
+            )
+
+    def test_status_matches_available_machines_and_earliest_run(self):
+        records = [
+            {"state": "online"},
+            {"state": "online"},
+            {"state": "offline"},
+        ]
+        scheduled = [
+            {"unit": "delegation-loop.timer", "next": 1_700_000_300},
+            {"unit": "lupin-once-0123456789abcdef.timer", "next": 1_700_000_100},
+        ]
+        with (
+            mock.patch.object(serve.machines, "machines", return_value=records),
+            mock.patch.object(serve, "timers", return_value=scheduled),
+            mock.patch.object(serve.time, "time", return_value=1_700_000_000),
+        ):
+            status = serve.render_dashboard_status({})
+
+        self.assertIn("2 of 3 machines available", status)
+        self.assertIn("status-warn", status)
+        self.assertNotIn("status-ok", status)
+        self.assertIn("data-until='1700000100'", status)
+        self.assertIn(time.strftime("%H:%M:%S", time.localtime(1_700_000_000)), status)
+
+    def test_all_online_fleet_is_healthy(self):
+        with (
+            mock.patch.object(
+                serve.machines, "machines", return_value=[{"state": "online"}]
+            ),
+            mock.patch.object(serve, "timers", return_value=[]),
+        ):
+            status = serve.render_dashboard_status({})
+
+        self.assertIn("1 of 1 machines available", status)
+        self.assertIn("status-ok", status)
+
+    def test_partial_machine_records_are_not_healthy(self):
+        def read_records(_connection, skipped, *, strict):
+            skipped.append("machine:broken")
+            return [{"state": "online"}]
+
+        with (
+            mock.patch.object(
+                serve.machines, "machines", side_effect=read_records
+            ),
+            mock.patch.object(serve, "timers", return_value=[]),
+        ):
+            status = serve.render_dashboard_status({})
+
+        self.assertIn("1 of 2 machines available · incomplete", status)
+        self.assertIn("warning: skipped unreadable Redis record(s): machine:broken", status)
+        self.assertNotIn("status-ok", status)
+
+    def test_dashboard_status_reuses_existing_page_data(self):
+        status_data = {
+            "machines": [
+                {"state": "online"},
+                {"state": "draining"},
+                {"state": "offline"},
+            ],
+            "fleet_error": None,
+            "timers": [{"unit": "delegation-loop.timer", "next": 1_800_000_000}],
+            "timer_error": None,
+        }
+        with (
+            mock.patch.object(
+                serve.machines, "machines", side_effect=AssertionError("duplicate read")
+            ),
+            mock.patch.object(serve, "timers", side_effect=AssertionError("duplicate read")),
+        ):
+            response = self._reply_page("overview", status_data)
+
+        status = self._status_fragment(response)
+        self.assertIn("1 of 3 machines available", status)
+        self.assertIn("data-until='1800000000'", status)
+        self.assertIn("Updated", status)
+
+    def test_fleet_and_schedule_read_errors_are_unavailable(self):
+        status_data = {
+            "machines": [],
+            "fleet_error": "registry unavailable",
+            "timers": [],
+            "timer_error": "systemd unavailable",
+        }
+        with (
+            mock.patch.object(
+                serve.machines, "machines", side_effect=AssertionError("duplicate read")
+            ),
+            mock.patch.object(serve, "timers", side_effect=AssertionError("duplicate read")),
+        ):
+            response = self._reply_page("overview", status_data)
+
+        status = self._status_fragment(response)
+        self.assertEqual(status.count("Unavailable"), 2)
+        self.assertNotIn("No machines registered", status)
+        self.assertNotIn("No next run scheduled", status)
+        self.assertNotIn("status-ok", status)
+
+    def test_missing_status_values_are_explicit_and_warned(self):
+        with (
+            mock.patch.object(serve.machines, "machines", return_value=[]),
+            mock.patch.object(serve, "timers", return_value=[]),
+        ):
+            status = serve.render_dashboard_status({})
+
+        self.assertIn("No machines registered", status)
+        self.assertIn("No next run scheduled", status)
+        self.assertEqual(status.count("status-warn"), 2)
+        self.assertNotIn("status-ok", status)
+
+    def test_unreadable_status_values_are_unavailable_and_warned(self):
+        with (
+            mock.patch.object(
+                serve.machines,
+                "machines",
+                side_effect=serve.machines.CoordinatorUnreachable("machine registry"),
+            ),
+            mock.patch.object(
+                serve, "timers", side_effect=serve.ScheduleUnavailable("timer list")
+            ),
+        ):
+            status = serve.render_dashboard_status({})
+
+        self.assertEqual(status.count("Unavailable"), 2)
+        self.assertEqual(status.count("status-warn"), 2)
+        self.assertNotIn("status-ok", status)
+
+    def test_read_timers_distinguishes_valid_empty_from_failure(self):
+        with mock.patch.object(serve, "run", return_value=(0, "[]")):
+            self.assertEqual(serve._read_timers(), ([], None))
+        with mock.patch.object(
+            serve, "run", return_value=(1, "systemctl unavailable")
+        ):
+            self.assertEqual(
+                serve._read_timers(),
+                ([], "systemd timer list is unavailable"),
+            )
+
+    def test_strict_timer_reader_distinguishes_unavailable_from_empty(self):
+        with mock.patch.object(serve, "run", return_value=(1, "systemctl unavailable")):
+            with self.assertRaises(serve.ScheduleUnavailable):
+                serve.timers(strict=True)

@@ -15,6 +15,8 @@ All notable changes to Lupin. The version has one source:
 - The Roadmap board shows stage tabs with counts, like the List view.
 - The triage skill checks issue details and linked open PRs before it reports
   likely duplicates.
+- Dashboard pages show fleet availability, the next scheduled run, and the
+  page update time.
 
 ### Changed
 

@@ -473,14 +473,26 @@ def _repo_platforms() -> dict[str, str]:
 
 
 
-def timers() -> list[dict]:
+class ScheduleUnavailable(RuntimeError):
+    """The local schedule could not be read."""
+
+
+def timers(*, strict: bool = False) -> list[dict]:
     """Delegation timers, from systemd's own JSON. Times are epoch seconds."""
     rc, out = run(["systemctl", "list-timers", "--all", "--no-pager", "--output=json"])
     if rc != 0:
+        if strict:
+            raise ScheduleUnavailable("systemd timer list is unavailable")
         return []
     try:
         rows = json.loads(out)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        if strict:
+            raise ScheduleUnavailable("systemd returned invalid timer data") from exc
+        return []
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        if strict:
+            raise ScheduleUnavailable("systemd returned invalid timer data")
         return []
     result = []
     for row in rows:
@@ -491,6 +503,12 @@ def timers() -> list[dict]:
             continue
         nxt = row.get("next")
         last = row.get("last")
+        if strict and any(
+            value is not None
+            and (isinstance(value, bool) or not isinstance(value, (int, float)))
+            for value in (nxt, last)
+        ):
+            raise ScheduleUnavailable("systemd returned invalid timer data")
         result.append(
             {
                 "unit": unit,
@@ -500,6 +518,13 @@ def timers() -> list[dict]:
             }
         )
     return sorted(result, key=lambda t: (t["next"] is None, t["next"] or 0))
+
+
+def _read_timers() -> tuple[list[dict], str | None]:
+    try:
+        return timers(strict=True), None
+    except ScheduleUnavailable as exc:
+        return [], str(exc)
 
 
 def oneoff_repositories(unit: str) -> str:
@@ -790,12 +815,14 @@ def gather(peek_lines: int, connection: dict | None = None) -> dict:
     del peek_lines
     connection = connection or {}
     loop_state = gather_loops(connection)
+    timer_rows, timer_error = _read_timers()
     state = {
         "now": time.time(),
         "enabled": enabled_repos(),
         "repos": code_repos(),
         "loops": loop_state["entries"],
-        "timers": timers(),
+        "timers": timer_rows,
+        "timer_error": timer_error,
         "timer_active": timer_active(),
     }
     state.update({
@@ -857,10 +884,12 @@ def gather_schedule(connection: dict) -> dict:
     for the "Run now" placement picker (same `fleet_state()` /machines and
     /loops already read -- one reading of the registry, not a new one)."""
     state = fleet_state(connection)
+    timer_rows, timer_error = _read_timers()
     return {
         "now": time.time(),
         "enabled": enabled_repos(),
-        "timers": timers(),
+        "timers": timer_rows,
+        "timer_error": timer_error,
         "timer_active": timer_active(),
         "machines": state.get("machines", []),
         "fleet_error": state.get("fleet_error"),
@@ -971,6 +1000,15 @@ font-size:14px;color:var(--ink)}
 .content{flex:1;min-width:0;display:flex;flex-direction:column}
 .topbar{display:flex;align-items:center;gap:14px;padding:12px 28px;
 border-bottom:1px solid var(--line);font-size:13px;color:var(--ink2)}
+.dashboard-status{display:flex;align-items:center;gap:.35rem 1rem;flex-wrap:wrap}
+.dashboard-status-item{display:flex;align-items:center;gap:.35rem;white-space:nowrap}
+.dashboard-status-label{color:var(--ink3)}
+.dashboard-status-value{font:500 12px var(--mono);color:var(--ink)}
+.dashboard-status-value.status-ok{color:var(--ok)}
+.dashboard-status-value.status-warn,.dashboard-status-warning{color:var(--warn)}
+.dashboard-status-warning{font-size:.75rem}
+@media(max-width:700px){.topbar{flex-wrap:wrap;gap:.5rem;padding:10px 14px}
+.dashboard-status{order:3;flex:1 0 100%;gap:.35rem .75rem}}
 .topbar .sp{flex:1}
 .autolabel{display:flex;align-items:center;gap:6px;cursor:pointer}
 .iconbtn{width:32px;height:32px;flex:none;padding:0;display:flex;align-items:center;
@@ -1261,6 +1299,10 @@ def render_nav(active: str) -> str:
     )
 
 
+STATUS_PAGES = frozenset({"overview", "usage", "loops", "schedule", "repos", "roadmap", "models"})
+DASHBOARD_STATUS_SLOT = "<!-- dashboard-status -->"
+
+
 def render_topbar(extra_html: str = "") -> str:
     return (
         "<div class=topbar>"
@@ -1275,6 +1317,109 @@ def render_topbar(extra_html: str = "") -> str:
     )
 
 
+def render_dashboard_status(connection: dict, data: dict | None = None) -> str:
+    skipped = data.get("skipped_machines", []) if data is not None else []
+    if data is not None and "machines" in data:
+        records = data.get("machines")
+        fleet_error = data.get("fleet_error")
+        if fleet_error or not isinstance(records, list):
+            records = None
+    else:
+        try:
+            records = machines.machines(connection, skipped, strict=False)
+        except (machines.CoordinatorUnreachable, redis.exceptions.NoPermissionError):
+            records = None
+
+    warning = roadmap.skipped_warning(skipped) if skipped else ""
+    if records is None:
+        machine_value = "Unavailable"
+        machine_title = "Machine availability could not be read"
+        machine_state = "status-warn"
+    else:
+        available = sum(record.get("state") == "online" for record in records)
+        total = len(records) + len(skipped)
+        if skipped and not records:
+            machine_value = "Unavailable"
+            machine_title = "Machine records could not all be read"
+            machine_state = "status-warn"
+        elif skipped:
+            machine_value = f"{available} of {total} machines available · incomplete"
+            machine_title = "Some machine records could not be read"
+            machine_state = "status-warn"
+        elif records:
+            machine_value = f"{available} of {total} machines available"
+            machine_title = "Availability from live machine heartbeats"
+            machine_state = "status-ok" if available == total else "status-warn"
+        else:
+            machine_value = "No machines registered"
+            machine_title = "No machine records are registered"
+            machine_state = "status-warn"
+
+    machine_item = (
+        f"<a class='dashboard-status-item' href='/machines' title='{esc(machine_title)}'>"
+        "<span class=dashboard-status-label>Fleet</span>"
+        f"<span class='dashboard-status-value {machine_state}'>{esc(machine_value)}</span></a>"
+    )
+    warning_item = (
+        f"<span class=dashboard-status-warning>{esc(warning)}</span>" if warning else ""
+    )
+
+    schedule_error = None
+    if data is not None and "timers" in data:
+        schedule = data["timers"]
+        schedule_error = data.get("timer_error")
+        if not isinstance(schedule, list):
+            schedule_error = "invalid timer data"
+    else:
+        try:
+            schedule = timers(strict=True)
+        except ScheduleUnavailable as exc:
+            schedule = []
+            schedule_error = str(exc)
+
+    if schedule_error:
+        next_item = (
+            "<span class=dashboard-status-item><span class=dashboard-status-label>Next run</span>"
+            "<span class='dashboard-status-value status-warn'>Unavailable</span></span>"
+        )
+    else:
+        scheduled = [
+            row["next"]
+            for row in schedule
+            if isinstance(row.get("next"), (int, float)) and row["next"] > 0
+        ]
+        next_run = min(scheduled) if scheduled else None
+        if next_run is None:
+            next_value = (
+                "<span class='dashboard-status-value status-warn'>No next run scheduled</span>"
+            )
+        else:
+            next_text = time.strftime("%a %H:%M %Z", time.localtime(next_run))
+            next_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(next_run))
+            next_value = (
+                f"<time class='dashboard-status-value mono' datetime='{esc(next_iso)}' "
+                f"data-until='{next_run:.0f}' title='Next scheduled run: {esc(next_text)}'>"
+                f"at {esc(next_text)}</time>"
+            )
+        next_item = (
+            "<span class=dashboard-status-item><span class=dashboard-status-label>Next run</span>"
+            f"{next_value}</span>"
+        )
+
+    now = time.time()
+    updated_text = time.strftime("%H:%M:%S", time.localtime(now))
+    updated_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now))
+    updated_title = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(now))
+    return (
+        "<div class=dashboard-status role=group aria-label='Dashboard status'>"
+        f"{machine_item}{warning_item}{next_item}"
+        "<span class=dashboard-status-item><span class=dashboard-status-label>Updated</span>"
+        f"<time class='dashboard-status-value mono' datetime='{esc(updated_iso)}' "
+        f"title='Dashboard rendered at {esc(updated_title)}'>{esc(updated_text)}</time></span>"
+        "</div>"
+    )
+
+
 def page(
     title: str,
     body: str,
@@ -1283,6 +1428,7 @@ def page(
     active: str = "",
     topbar_extra: str = "",
 ) -> bytes:
+    status_slot = DASHBOARD_STATUS_SLOT if active in STATUS_PAGES else ""
     return (
         "<!doctype html><html lang=en><head><meta charset=utf-8>"
         f"{THEME_BOOTSTRAP}"
@@ -1290,7 +1436,7 @@ def page(
         "<link rel=icon href='/favicon.ico' type='image/svg+xml'>"
         f"<title>{esc(title)}</title><style>{CSS}{extra_css}</style></head>"
         f"<body><div class=shell>{render_nav(active)}<div class=content>"
-        f"{render_topbar(topbar_extra)}<main>{body}</main></div></div>"
+        f"{render_topbar(topbar_extra + status_slot)}<main>{body}</main></div></div>"
         f"<script>{JS}{extra_js}</script></body></html>"
     ).encode("utf-8")
 
@@ -3205,6 +3351,15 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def reply(self, body: bytes, status: int = 200) -> None:
+        marker = DASHBOARD_STATUS_SLOT.encode("ascii")
+        if marker in body:
+            status_html = b""
+            if status < 400:
+                status_html = render_dashboard_status(
+                    self.fleet_connection,
+                    getattr(self, "dashboard_status_data", None),
+                ).encode("utf-8")
+            body = body.replace(marker, status_html)
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -3301,6 +3456,7 @@ class Handler(BaseHTTPRequestHandler):
         return roadmap.render_combined_page(repos, models, roadmap_page, query, quest_state)
 
     def do_GET(self):  # noqa: N802
+        self.dashboard_status_data = None
         if not self.host_ok():
             self.reply(render_error("bad Host header"), 421)
             return
@@ -3317,47 +3473,12 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(FAVICON)
         elif url.path == "/":
-            self.reply(render_dashboard(gather(self.peek_lines, self.fleet_connection)))
+            status_data = gather(self.peek_lines, self.fleet_connection)
+            self.dashboard_status_data = status_data
+            self.reply(render_dashboard(status_data))
         elif url.path == "/roadmap":
-            try:
-                machine_skipped: list[str] = []
-                machine_records = machines.machines(self.fleet_connection, machine_skipped, strict=False)
-                online = sum(record.get("state") == "online" for record in machine_records)
-                fleet_html = (
-                    "<a class='machine-count' href='/machines' style='display:flex;align-items:center;gap:6px'>"
-                    f"<span class='machine-dot {'online' if online == len(machine_records) else ''}'></span>"
-                    f"{online} of {len(machine_records)} machines</a>"
-                )
-                warning = roadmap.skipped_warning(machine_skipped)
-                if warning:
-                    fleet_html += f"<span class='machine-count'>{html.escape(warning)}</span>"
-            except machines.CoordinatorUnreachable:
-                fleet_html = "<span class='machine-count'>Machine status unavailable</span>"
-            recurring = next((row for row in timers() if row["unit"] == "delegation-loop.timer"), None)
-            next_run = recurring.get("next") if recurring else None
-            if next_run:
-                timer_html = (
-                    f"<span class=machine-timer>{icon('M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z', 14)}"
-                    f"Next run <b data-until='{next_run:.0f}'></b></span>"
-                )
-            elif not timer_active():
-                timer_html = "<span class=machine-timer>Timer paused</span>"
-            else:
-                timer_html = ""
-            roadmap_topbar = (
-                f"{fleet_html}{timer_html}<span class='updated-label'>Updated "
-                f"{time.strftime('%H:%M:%S', time.localtime())}</span>"
-            )
-
             def roadmap_page(title, body, extra_css="", extra_js=""):
-                return page(
-                    title,
-                    body,
-                    extra_css,
-                    extra_js,
-                    active="roadmap",
-                    topbar_extra=roadmap_topbar,
-                )
+                return page(title, body, extra_css, extra_js, active="roadmap")
 
             repos = roadmap.repository_names(code_repos())
             selected = query.get("repo", "").strip()
@@ -3430,7 +3551,9 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/loops":
             self.do_loops(query)
         elif url.path == "/schedule":
-            self.reply(render_schedule(gather_schedule(self.fleet_connection), sent=query.get("sent")))
+            status_data = gather_schedule(self.fleet_connection)
+            self.dashboard_status_data = status_data
+            self.reply(render_schedule(status_data, sent=query.get("sent")))
         elif url.path == "/peek":
             self.do_peek(query)
         elif url.path == "/image":
@@ -3593,6 +3716,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
         data = gather_repos(self.fleet_connection)
+        self.dashboard_status_data = data
         self.reply(
             render_repos(
                 data,
@@ -3813,6 +3937,7 @@ class Handler(BaseHTTPRequestHandler):
         lines = int(lines_raw)
 
         data = gather_loops(self.fleet_connection)
+        self.dashboard_status_data = data
         entries = data["entries"]
         selected_repo = (query.get("repo") or "").strip()
         selected = next((e for e in entries if e["repo"] == selected_repo), None)
