@@ -219,21 +219,42 @@ def _repo_slot_name(repo: str) -> str:
 
 
 def _delegation_doc_template(repo: str) -> str:
-    """A minimal starting doc for a repo that has none yet ("Generate docs
-    and add", issue #23). No existing doc generator was found in this repo
-    (grepped for "generate"/"scaffold"/LOOP_DOC outside serve.py and
-    docs/) -- this is a plain fill-in-the-blanks skeleton, not a smart
-    generator.
-    """
+    """A safe draft guide for a repo that has no delegation doc."""
     return (
+        "> **Draft: Not ready for loop runs.**\n"
+        "> The repo owner must add the repo purpose,\n"
+        "> first-work scope, and protected paths\n"
+        "> before adding it to the schedule.\n\n"
         f"# {repo} -- the delegation loop\n\n"
-        "This file gives repo-specific guidance. Fill it in with useful details;\n"
-        "a loop can run without it.\n\n"
-        "## What this repo is for\n\n"
-        "TODO: say what this repo does, and what the first loops should build.\n\n"
-        "## Rules\n\n"
-        "TODO: anything a loop must know before it starts -- how to test,\n"
-        "what not to touch, where to push its work.\n"
+        "## Before starting\n\n"
+        "Read the root `AGENTS.md` and follow its\n"
+        "rules. Read the issue and any linked pull\n"
+        "requests before changing code. Do not add\n"
+        "work outside the issue's scope.\n\n"
+        "## Repo purpose\n\n"
+        "Use the project documentation to learn\n"
+        "what this repo does and what work it\n"
+        "supports. Ask the repo owner if this is\n"
+        "not clear.\n\n"
+        "## Test command\n\n"
+        "Find the test command in the root\n"
+        "`AGENTS.md` or test documentation. Run that\n"
+        "command. Do not guess. If no test command\n"
+        "is documented, report this and ask the repo\n"
+        "owner before changing code.\n\n"
+        "## Do not touch\n\n"
+        "Do not touch secrets, generated files, or\n"
+        "third-party code copied into the repo.\n"
+        "Do not edit paths the root `AGENTS.md`\n"
+        "marks as protected. Ask before changing a\n"
+        "protected path not listed here.\n\n"
+        "## Report\n\n"
+        "Follow documented branch, pull request,\n"
+        "and handoff rules. Report commands, their\n"
+        "results, and any blockers. Do not say this\n"
+        "repo is ready for loops until the owner\n"
+        "completes this draft and adds the repo to\n"
+        "the schedule.\n"
     )
 
 
@@ -2418,10 +2439,9 @@ def _repo_slot_controls(repo: str, current_max: int) -> str:
 
 
 def _render_add_panel(tab: str, repos: list[dict]) -> str:
-    """The "Add repo" card. "Existing repo" (issue #23) is fully wired:
-    a repo with a doc gets an "add to schedule" button, one without gets
-    "generate docs and add". "Clone from Git" and "Create new" are shown
-    but inert -- see this issue's report for why: both are real
+    """The "Add repo" card. Existing repos have separate actions to add them
+    to the schedule or generate a draft guide. "Clone from Git" and "Create
+    new" are shown but inert -- see this issue's report for why: both are real
     filesystem/git-network operations (an arbitrary clone URL, process
     spawning, file generation) with a bigger security surface than
     anything else on this page, and landing them safely didn't fit this
@@ -2474,7 +2494,7 @@ def _render_add_panel(tab: str, repos: list[dict]) -> str:
         generate_form = (
             "<form method=post action=/repos/generate-docs style='display:inline'>"
             f"<input type=hidden name=repo value='{esc(repo)}'>"
-            "<button type=submit>Generate docs and add</button></form>"
+            "<button type=submit>Generate draft doc</button></form>"
             if not r.get("has_doc")
             else ""
         )
@@ -3687,10 +3707,11 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             self.reply(render_error(f"could not write doc: {exc}"), 500)
             return
-        enabled = _repo_platforms()
-        enabled.setdefault(repo, "claude")
-        write_enabled_repos(enabled)
-        self.redirect(f"/repos?sent={quote(f'generated docs and added {repo}', safe='')}")
+        message = (
+            f"Draft created for {repo}. It is not scheduled. Review the file, "
+            "then use Add to schedule when ready."
+        )
+        self.redirect(f"/repos?sent={quote(message, safe='')}")
 
     def do_repos_remove(self, form: dict) -> None:
         repo = form.get("repo", [""])[0].strip()

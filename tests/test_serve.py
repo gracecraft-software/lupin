@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from importlib import resources
 from unittest import mock
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 import redis as redis_lib
@@ -3782,10 +3782,13 @@ class RepoRenderTests(unittest.TestCase):
         page = serve.render_repos(self._data(), sent="widgets added to the schedule").decode()
         self.assertIn("widgets added to the schedule", page)
 
-    def test_add_panel_offers_schedule_and_optional_doc_generation(self):
+    def test_add_panel_offers_separate_schedule_and_draft_actions(self):
         page = serve.render_repos(self._data(), add="existing").decode()
         self.assertIn("action=/repos/add", page)
+        self.assertIn("Add to schedule", page)
         self.assertIn("action=/repos/generate-docs", page)
+        self.assertIn("Generate draft doc", page)
+        self.assertNotIn("Generate docs and add", page)
         self.assertIn("no delegation doc (optional)", page)
 
     def test_add_panel_new_tab_is_disabled_with_a_note(self):
@@ -3986,21 +3989,33 @@ class TestReposPageRoutes:
         handler.do_POST()
         assert handler.reply.call_args.args[1] == 400
 
-    def test_generate_docs_route_writes_a_doc_and_adds_to_the_schedule(self, tmp_path, monkeypatch):
+    def test_generate_docs_route_writes_a_draft_without_scheduling_the_repo(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
         _make_repo(tmp_path, "widgets", doc=False)
-        monkeypatch.setattr(serve, "_repo_platforms", lambda: {})
-        written = {}
-        monkeypatch.setattr(
-            serve, "write_enabled_repos", lambda values: written.setdefault("values", values)
-        )
+        write_enabled = mock.Mock()
+        monkeypatch.setattr(serve, "write_enabled_repos", write_enabled)
         handler = _repos_handler()
         _post_body(handler, "/repos/generate-docs", {"repo": "widgets"})
         handler.do_POST()
         doc_path = tmp_path / "widgets" / "docs" / "delegation-loop.md"
+        doc = doc_path.read_text(encoding="utf-8")
         assert doc_path.is_file()
-        assert "widgets" in doc_path.read_text()
-        assert written["values"] == {"widgets": "claude"}
+        assert doc.startswith("> **Draft: Not ready for loop runs.**")
+        assert "## Test command" in doc
+        assert "Do not guess." in doc
+        flat_doc = " ".join(doc.split())
+        assert "ask the repo owner before changing code" in flat_doc
+        assert "## Repo purpose" in doc
+        assert "Use the project documentation to learn" in doc
+        assert "## Do not touch" in doc
+        assert "Do not touch secrets, generated files, or third-party code copied" in flat_doc
+        assert "TODO:" not in doc
+        write_enabled.assert_not_called()
+        message = parse_qs(urlsplit(handler.redirect.call_args.args[0]).query)["sent"][0]
+        assert message == (
+            "Draft created for widgets. It is not scheduled. Review the file, "
+            "then use Add to schedule when ready."
+        )
 
     def test_remove_route_rejects_a_repo_not_on_the_schedule(self, monkeypatch):
         monkeypatch.setattr(serve, "enabled_repos", lambda: ["other"])
@@ -4080,7 +4095,6 @@ class TestReposPageRoutes:
             "lupin": "omp",
             "roundsmith": "claude",
             "localno": "claude",
-            "fresh": "claude",
         }
 
         handler = _repos_handler()
@@ -4089,7 +4103,6 @@ class TestReposPageRoutes:
         assert _schedule_pairs(repos_file) == {
             "lupin": "omp",
             "roundsmith": "claude",
-            "fresh": "claude",
         }
 
     def test_doc_save_keeps_the_line_endings_of_the_file(self, tmp_path, monkeypatch):

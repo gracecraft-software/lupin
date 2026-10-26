@@ -18,6 +18,8 @@ All notable changes to Lupin. The version has one source:
 
 ### Changed
 
+- Generating a delegation guide creates a draft. A person must add the repo to
+  the schedule as a separate action.
 - `lupin run` starts from `origin/HEAD`, or else `origin/main`. It no longer
   checks `origin/release/next` or `origin/master`, and CI no longer lists
   `release/next`.
