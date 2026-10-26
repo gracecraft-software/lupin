@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -550,6 +551,7 @@ def test_start_loop_starts_without_delegation_doc_and_skips_duplicate(
     assert metadata["platform"] == "omp"
     assert metadata["provider"] == "openai-codex"
     assert metadata["model"] == "openai-codex/gpt-5.2"
+    assert metadata["routing_decision"] == "explicit"
     prompt = Path(metadata["prompt_file"]).read_text(encoding="utf-8")
     assert prompt.endswith("review\n")
     assert command[1:] == [
@@ -1231,6 +1233,7 @@ def test_start_loop_selects_profile_candidate_and_persists_it_for_recovery(
     assert metadata["platform"] == "omp"
     assert metadata["provider"] == "opencode-go"
     assert metadata["model"] == "opencode-go/deepseek-v4.1-flash:xhigh"
+    assert metadata["routing_decision"] == "profile"
 
 
 def test_disable_repo_removes_its_orchestrator_profile(monkeypatch, tmp_path):
@@ -1520,6 +1523,15 @@ def test_agent_workspace_directory_is_the_run_worktree_not_the_checkout(
     monkeypatch.setattr(loop_runtime, "_workspace_by_id", lambda session, workspace_id: None)
     monkeypatch.setattr(loop_runtime, "_runtime_paths", lambda repo: {})
     monkeypatch.setattr(loop_runtime, "_herdr_json", herdr_json)
+    now = time.time()
+    monkeypatch.setattr(
+        "lupin.quota_cache.read_snapshot",
+        lambda **_kwargs: {
+            "claude": _quota_entry([
+                _quota_row("claude", 20, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+            ]),
+        },
+    )
     monkeypatch.setattr(loop_runtime.slots, "hold", lambda *args, **kwargs: 0)
 
     rc = loop_runtime._monitor_loop(
@@ -1538,6 +1550,7 @@ def test_monitor_logs_herdr_server_loss_with_reason(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "herdr-loops")
     loop_runtime._write_metadata("widgets", {
         "run_id": run_id, "repo": "widgets", "platform": "omp",
+        "provider": "openai-codex", "model": "openai-codex/gpt-6-luna:xhigh",
         "session": loop_runtime.SESSION_NAME, "state": "running",
     })
     server_states = iter((True, False))
@@ -1548,6 +1561,15 @@ def test_monitor_logs_herdr_server_loss_with_reason(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(loop_runtime, "_agent_for_workspace", lambda session, workspace_id: {"name": "lupin-loop"})
     monkeypatch.setattr(loop_runtime, "_agent_command", lambda *args, **kwargs: ["agent"])
     monkeypatch.setattr(loop_runtime.slots, "hold", lambda *args, **kwargs: 1)
+    now = time.time()
+    monkeypatch.setattr(
+        "lupin.quota_cache.read_snapshot",
+        lambda **_kwargs: {
+            "openai": _quota_entry([
+                _quota_row("openai", 20, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+            ]),
+        },
+    )
 
     with pytest.raises(loop_runtime.LoopError, match="stopped with status 1"):
         loop_runtime._monitor_loop(
@@ -2693,3 +2715,497 @@ def test_monitor_reports_an_acl_denial_once_without_the_password(
     assert len(lines) == 1, err
     assert "ACL" in lines[0]
     assert no_eval_kw["redis_password"] not in err
+
+
+def _quota_handoff_harness(
+    monkeypatch,
+    tmp_path: Path,
+    quota_snapshot: dict,
+    profile: list[str],
+    *,
+    first_exit: int = 0,
+    redis_port: int | None = None,
+    stop_after_hold: int = 1,
+    pane_output: str = "",
+    routing_decision: str = "profile",
+    quota_poll_interval: float = 3600,
+    hold_delay: float = 0,
+) -> dict:
+    state_dir = tmp_path / "state"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
+    monkeypatch.setattr(loop_runtime, "ORCHESTRATORS_FILE", state_dir / "orchestrators.json")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path / "code")
+    monkeypatch.setattr(loop_runtime, "QUOTA_POLL_INTERVAL", quota_poll_interval)
+    loop_runtime._write_metadata("widgets", {
+        "version": 1,
+        "repo": "widgets",
+        "session": loop_runtime.SESSION_NAME,
+        "platform": "omp",
+        "provider": "opencode-go",
+        "model": "opencode-go/deepseek-v4.1-flash",
+        "routing_decision": routing_decision,
+        "state": "starting",
+        "worktree": str(worktree),
+        "branch": "lupin-loop/20261026-000001",
+    })
+    if redis_port is None:
+        monkeypatch.setattr(loop_runtime, "_redis_kwargs", lambda: {})
+        monkeypatch.setattr(
+            loop_runtime, "_renew_claims", lambda _repo, _holder, stop: stop.wait(),
+        )
+    else:
+        monkeypatch.setenv("LUPIN_REDIS_HOST", "127.0.0.1")
+        monkeypatch.setenv("LUPIN_REDIS_PORT", str(redis_port))
+        monkeypatch.setattr(claims, "DEFAULT_TTL", 60)
+        monkeypatch.setattr(loop_runtime, "CLAIM_RENEW_INTERVAL", 0.05)
+    monkeypatch.setattr(loop_runtime, "orchestrator_profiles", lambda: {"widgets": profile})
+    monkeypatch.setattr(
+        "lupin.quota_cache.read_snapshot", lambda **_kwargs: quota_snapshot,
+    )
+
+    workspace = {
+        "id": "w1",
+        "root_pane": {"workspace_id": "w1", "pane_id": "p1"},
+    }
+    state = {
+        "agent_active": False,
+        "hold_running": False,
+        "handoff_while_hold_running": False,
+        "commands": [],
+        "herdr_calls": [],
+        "hold_count": 0,
+        "handoff_prompts": 0,
+        "workspace_creates": 0,
+    }
+
+    def server_running(_session):
+        metadata = loop_runtime._read_metadata("widgets") or {}
+        if metadata.get("state") == "needs_attention":
+            return False
+        return stop_after_hold <= 1 or state["hold_count"] < stop_after_hold
+
+    def herdr_json(_session, *args, **_kwargs):
+        state["herdr_calls"].append(args)
+        if args[:2] == ("workspace", "create"):
+            state["workspace_creates"] += 1
+        return {
+            "workspace": {"id": "w1"},
+            "root_pane": {"workspace_id": "w1", "pane_id": "p1"},
+        }
+
+    def herdr(_session, *args, **_kwargs):
+        state["herdr_calls"].append(args)
+        if args[:2] == ("agent", "prompt"):
+            state["handoff_prompts"] += 1
+            state["handoff_while_hold_running"] = state["hold_running"]
+            (worktree / "HANDOFF.md").write_text(
+                "## Progress\n\nIssue #60 is under way.\n\n"
+                "## Active work\n\nThe quota handoff is being saved.\n\n"
+                "## Blockers\n\nQuota is low.\n\n"
+                "## Next action\n\nContinue the same branch.\n",
+                encoding="utf-8",
+            )
+        elif args[:2] == ("agent", "send-keys"):
+            state["agent_active"] = False
+        elif args[:2] == ("pane", "read"):
+            return pane_output
+        return ""
+
+    def hold(command, **_kwargs):
+        state["hold_count"] += 1
+        state["commands"].append(command)
+        state["agent_active"] = True
+        state["hold_running"] = True
+        if hold_delay:
+            time.sleep(hold_delay)
+        state["hold_running"] = False
+        if state["hold_count"] == 1 and redis_port is not None:
+            holder = _agent_holder(state["herdr_calls"])
+            assert holder
+            claims.claim(
+                "acme/repo#60", holder, ttl=60,
+                redis_host="127.0.0.1", redis_port=redis_port,
+            )
+            state["claim_holder"] = holder
+        return first_exit if state["hold_count"] == 1 else 0
+
+    monkeypatch.setattr(loop_runtime, "_ensure_server", lambda *_args: None)
+    monkeypatch.setattr(loop_runtime, "_server_running", server_running)
+    monkeypatch.setattr(loop_runtime, "_find_workspace", lambda *_args: None)
+    monkeypatch.setattr(
+        loop_runtime, "_workspace_by_id",
+        lambda _session, workspace_id: workspace if workspace_id == "w1" else None,
+    )
+    monkeypatch.setattr(
+        loop_runtime, "_agents",
+        lambda _session: [{
+            "name": "lupin-omp",
+            "workspace_id": "w1",
+            "agent_status": "working" if state["hold_running"] else "done",
+        }] if state["agent_active"] else [],
+    )
+    monkeypatch.setattr(loop_runtime, "_runtime_paths", lambda _repo: {})
+    monkeypatch.setattr(loop_runtime, "_herdr_json", herdr_json)
+    monkeypatch.setattr(loop_runtime, "_herdr", herdr)
+    monkeypatch.setattr(loop_runtime.slots, "hold", hold)
+    return state
+
+
+def test_monitor_cancels_low_quota_slot_wait_and_resumes_alternate(
+    monkeypatch, tmp_path: Path, redis_port, flush_redis
+):
+    now = time.time()
+    snapshot = {
+        "opencode-go": _quota_entry([
+            _quota_row("opencode-go", 85, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 15, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+    real_hold = loop_runtime.slots.hold
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, snapshot,
+        ["opencode-go/deepseek-v4.1-flash", "openai-codex/gpt-6-luna:xhigh"],
+        redis_port=redis_port,
+    )
+    simulated_agent_run = loop_runtime.slots.hold
+    slot_waiting = threading.Event()
+    watch_finished = threading.Event()
+    leases = []
+    released = []
+
+    def watch(repo, session, workspace, watch_state):
+        assert slot_waiting.wait(5)
+        loop_runtime._quota_watch_tick(repo, session, workspace, watch_state)
+        watch_finished.set()
+
+    def acquire(slot, _holder, *, cancel_wait, **_kwargs):
+        if "original_wait_cancelled" not in state:
+            snapshot["opencode-go"]["rows"][0]["used_pct"] = 92
+            slot_waiting.set()
+            assert watch_finished.wait(5)
+            state["original_wait_cancelled"] = cancel_wait()
+            assert state["original_wait_cancelled"]
+            return None
+        lease = f"{slot}:lease-{len(leases) + 1}"
+        leases.append(lease)
+        return lease
+
+    def release(lease, **_kwargs):
+        released.append(lease)
+        return True
+
+    def run_with_lease(command, lease, **kwargs):
+        try:
+            return simulated_agent_run(command)
+        finally:
+            kwargs["release"](lease)
+
+    monkeypatch.setattr(loop_runtime, "_quota_watch", watch)
+    monkeypatch.setattr(loop_runtime, "_server_running", lambda _session: state["hold_count"] == 0)
+    monkeypatch.setattr(loop_runtime.slots, "hold", real_hold)
+    monkeypatch.setattr(loop_runtime.slots, "acquire", acquire)
+    monkeypatch.setattr(loop_runtime.slots, "release", release)
+    monkeypatch.setattr(loop_runtime.slots._lease_runtime, "run_with_lease", run_with_lease)
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    launch = state["commands"][0]
+    prompt = Path(metadata["prompt_file"]).read_text(encoding="utf-8")
+    held = claims.claims_for(
+        ["acme/repo"], redis_host="127.0.0.1", redis_port=redis_port,
+    )
+    assert slot_waiting.is_set() and watch_finished.is_set()
+    assert state["original_wait_cancelled"]
+    assert len(state["commands"]) == 1
+    assert launch[launch.index("--provider") + 1] == "openai-codex"
+    assert state["workspace_creates"] == 1
+    assert metadata["workspace_id"] == "w1"
+    assert metadata["provider"] == "openai-codex"
+    assert metadata["quota_handoff"]["state"] == "interrupted"
+    assert metadata["quota_handoff"]["resumed_by"] == "openai-codex/gpt-6-luna:xhigh"
+    assert "agent_missing" in metadata["quota_handoff"]["reason"]
+    assert state["claim_holder"] in prompt
+    assert held["acme/repo#60"]["session"] == state["claim_holder"]
+    assert released == ["omp:lease-1"]
+
+def test_monitor_releases_acquired_lease_when_quota_handoff_arrives_before_launch(
+    monkeypatch, tmp_path: Path
+):
+    now = time.time()
+    snapshot = {
+        "opencode-go": _quota_entry([
+            _quota_row("opencode-go", 92, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+    real_hold = loop_runtime.slots.hold
+    real_acquire = loop_runtime.slots.acquire
+    _quota_handoff_harness(
+        monkeypatch, tmp_path, snapshot, ["opencode-go/deepseek-v4.1-flash"],
+    )
+
+    slot_root = tmp_path / "slots"
+    monkeypatch.setenv("LUPIN_STATE_ROOT", str(slot_root))
+    child_started = tmp_path / "child-started"
+    monkeypatch.setattr(
+        loop_runtime,
+        "_agent_command",
+        lambda *_args, **_kwargs: [
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(child_started)!r}).touch()",
+        ],
+    )
+
+    watch_context = {}
+    watch_ready = threading.Event()
+    acquired = []
+    pending_after_acquire = []
+
+    def watch(_repo, session, workspace, watch_state):
+        watch_context.update(session=session, workspace=workspace, state=watch_state)
+        watch_ready.set()
+
+    def acquire(slot, holder, **kwargs):
+        lease = real_acquire(slot, holder, **kwargs)
+        assert lease is not None
+        acquired.append(lease)
+        assert watch_ready.wait(5)
+        loop_runtime._quota_watch_tick(
+            "widgets", watch_context["session"], watch_context["workspace"],
+            watch_context["state"],
+        )
+        with watch_context["state"]["lock"]:
+            pending_after_acquire.append(watch_context["state"]["pending"] is not None)
+        return lease
+
+    server_checks = 0
+
+    def server_running(_session):
+        nonlocal server_checks
+        server_checks += 1
+        return server_checks == 1
+
+    monkeypatch.setattr(loop_runtime, "_quota_watch", watch)
+    monkeypatch.setattr(loop_runtime, "_server_running", server_running)
+    monkeypatch.setattr(loop_runtime.slots, "hold", real_hold)
+    monkeypatch.setattr(loop_runtime.slots, "acquire", acquire)
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    assert len(acquired) == 1 and acquired[0].startswith("omp:")
+    assert pending_after_acquire == [True]
+    assert not child_started.exists()
+    assert loop_runtime.slots.status(state_root=slot_root)["omp"]["holders"] == 0
+
+
+
+
+def test_monitor_requests_quota_handoff_before_limit_and_saves_all_sections(
+    monkeypatch, tmp_path: Path
+):
+    now = time.time()
+    snapshot = {
+        "opencode-go": _quota_entry([
+            _quota_row("opencode-go", 92, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, snapshot, ["opencode-go/deepseek-v4.1-flash"],
+        quota_poll_interval=0.01, hold_delay=0.1,
+    )
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    saved = Path(metadata["quota_handoff"]["path"]).read_text(encoding="utf-8")
+    assert state["handoff_prompts"] == 1
+    assert state["handoff_while_hold_running"]
+    assert metadata["quota_handoff"]["state"] == "resumable"
+    assert metadata["quota_handoff"]["headroom"] == 8
+    assert all(f"## {heading}" in saved for heading in (
+        "Progress", "Active work", "Blockers", "Next action",
+    ))
+    assert metadata["workspace_id"] == "w1"
+    assert "no alternate configured" in metadata["reason"]
+
+
+def test_monitor_records_interrupted_handoff_and_resumes_on_alternate(
+    monkeypatch, tmp_path: Path
+):
+    now = time.time()
+    snapshot = {
+        "opencode-go": _quota_entry([
+            _quota_row("opencode-go", 100, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 15, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+    profile = [
+        "opencode-go/deepseek-v4.1-flash",
+        "openai-codex/gpt-6-luna:xhigh",
+    ]
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, snapshot, profile,
+        first_exit=1, stop_after_hold=2,
+    )
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    saved = Path(metadata["quota_handoff"]["path"]).read_text(encoding="utf-8")
+    alternate = state["commands"][1]
+    assert state["handoff_prompts"] == 0
+    assert state["hold_count"] == 2
+    assert metadata["quota_handoff"]["state"] == "interrupted"
+    assert "usage ended before the handoff completed" in metadata["quota_handoff"]["reason"]
+    assert metadata["quota_handoff"]["resumed_by"] == "openai-codex/gpt-6-luna:xhigh"
+    assert "- State: interrupted" in saved
+    assert "Next action" in saved
+    assert "--workspace" in alternate
+    assert alternate[alternate.index("--workspace") + 1] == "w1"
+    assert metadata["workspace_id"] == "w1"
+
+
+def test_monitor_resumes_completed_handoff_on_fresh_alternate_quota_and_keeps_claim(
+    monkeypatch, tmp_path: Path, redis_port, flush_redis
+):
+    now = time.time()
+    snapshot = {
+        "opencode-go": _quota_entry([
+            _quota_row("opencode-go", 92, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 15, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+    profile = [
+        "opencode-go/deepseek-v4.1-flash",
+        "openai-codex/gpt-6-luna:xhigh",
+    ]
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, snapshot, profile,
+        redis_port=redis_port, stop_after_hold=2,
+    )
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    launch = state["commands"][1]
+    prompt_path = Path(launch[launch.index("--prompt-file") + 1])
+    resumed_prompt = prompt_path.read_text(encoding="utf-8")
+    held = claims.claims_for(
+        ["acme/repo"], redis_host="127.0.0.1", redis_port=redis_port,
+    )
+    assert len(state["commands"]) == 2
+    assert state["workspace_creates"] == 1
+    assert "--workspace" in launch and launch[launch.index("--workspace") + 1] == "w1"
+    assert launch[launch.index("--provider") + 1] == "openai-codex"
+    assert launch[launch.index("--model") + 1] == "openai-codex/gpt-6-luna:xhigh"
+    assert str(loop_runtime.STATE_DIR / "handoffs" / "widgets.HANDOFF.md") in resumed_prompt
+    assert state["claim_holder"] in resumed_prompt
+    assert "do not claim or start duplicate work" in resumed_prompt
+    assert metadata["quota_handoff"]["state"] == "resumed"
+    assert metadata["quota_handoff"]["resumed_by"] == "openai-codex/gpt-6-luna:xhigh"
+    assert metadata["workspace_id"] == "w1"
+    assert held["acme/repo#60"]["session"] == state["claim_holder"]
+    assert not any(call[:2] == ("agent", "send-keys") for call in state["herdr_calls"])
+
+def test_monitor_keeps_explicit_orchestrator_fixed_despite_profile_alternate(
+    monkeypatch, tmp_path: Path
+):
+    now = time.time()
+    snapshot = {
+        "opencode-go": _quota_entry([
+            _quota_row("opencode-go", 92, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 15, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, snapshot,
+        [
+            "opencode-go/deepseek-v4.1-flash",
+            "openai-codex/gpt-6-luna:xhigh",
+        ],
+        routing_decision="explicit",
+    )
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    assert state["hold_count"] == 1
+    assert metadata["provider"] == "opencode-go"
+    assert metadata["quota_handoff"]["state"] == "resumable"
+    assert "no alternate configured" in metadata["reason"]
+    assert "resumed_by" not in metadata["quota_handoff"]
+
+
+def test_monitor_keeps_resumable_handoff_when_alternate_quota_is_unknown(
+    monkeypatch, tmp_path: Path
+):
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, {},
+        [
+            "opencode-go/deepseek-v4.1-flash",
+            "openai-codex/gpt-6-luna:xhigh",
+        ],
+    )
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    assert state["hold_count"] == 1
+    assert state["handoff_prompts"] == 0
+    assert metadata["quota_handoff"]["state"] == "resumable"
+    assert "active provider quota is unknown" in metadata["quota_handoff"]["reason"]
+    saved = Path(metadata["quota_handoff"]["path"]).read_text(encoding="utf-8")
+    assert "- State: resumable" in saved
+    assert "no alternate usable quota" in metadata["reason"]
+    status = loop_runtime.loop_state("widgets")
+    assert status["state"] == "needs_attention"
+    assert status["reason"] == metadata["reason"]
+    assert Path(status["handoff"]).is_file()
+
+
+def test_monitor_marks_an_unknown_quota_as_interrupted_when_usage_error_ends_first(
+    monkeypatch, tmp_path: Path
+):
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, {},
+        ["opencode-go/deepseek-v4.1-flash"],
+        first_exit=1,
+        pane_output="429 quota exceeded",
+    )
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    saved = Path(metadata["quota_handoff"]["path"]).read_text(encoding="utf-8")
+    assert state["handoff_prompts"] == 0
+    assert metadata["quota_handoff"]["state"] == "interrupted"
+    assert "usage ended before the handoff completed" in metadata["quota_handoff"]["reason"]
+    assert "- State: interrupted" in saved

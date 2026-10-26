@@ -160,6 +160,20 @@ headroom is that of the best login that is not blocked. Profile order breaks
 ties. If no candidate
 has fresh, usable quota, Lupin refuses to start the loop.
 
+While a loop runs, its monitor checks the active provider's shared quota every
+30 seconds and when the agent returns to the monitor. At 10% or less quota
+remaining, Lupin asks the agent to stop new work and save progress, active work,
+blockers, and one next action in `HANDOFF.md`. It keeps the workspace and claim.
+If quota data is not fresh, Lupin stops the agent without a provider request and
+writes a handoff with the reason.
+
+If usage ends first, Lupin records an interrupted state and reason. With a
+fresh, usable alternate provider in the repo's profile, Lupin starts it in the
+same workspace and worktree with the handoff file. Otherwise, the loop needs
+attention, and the monitor keeps renewing its claim while it waits.
+`lupin loops REPO` shows the reason and handoff path. The monitor resumes when
+a configured alternate provider has fresh, usable quota.
+
 Explicit `--platform`, `--provider`, or `--model` selects one fixed orchestrator
 for the run, and skips profile routing. For OMP, use `--platform omp`, and
 optionally `--provider openai-codex|opencode-go` or `--model MODEL`. `openai`

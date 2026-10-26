@@ -1978,7 +1978,12 @@ def _cmd_loops(args: argparse.Namespace) -> int:
         print(json.dumps(rows))
     else:
         for row in rows:
-            print(f"{row.get('repo', '?')}: {row.get('state', 'unknown')} ({row.get('backend', 'unknown')})")
+            line = f"{row.get('repo', '?')}: {row.get('state', 'unknown')} ({row.get('backend', 'unknown')})"
+            if row.get("reason"):
+                line += f": {row['reason']}"
+            if row.get("handoff"):
+                line += f" (handoff: {row['handoff']})"
+            print(line)
     return 0
 
 

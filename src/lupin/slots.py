@@ -29,6 +29,7 @@ import os
 import secrets
 import time
 from pathlib import Path
+from typing import Callable
 
 from . import _lease_runtime
 
@@ -123,17 +124,20 @@ def acquire(
     ttl: float = DEFAULT_TTL,
     max_holders: int | None = None,
     state_root: str | Path | None = None,
-) -> str:
+    cancel_wait: Callable[[], bool] | None = None,
+) -> str | None:
     """Acquire a lease on `slot`, blocking up to `wait` seconds (polling).
 
-    Returns the lease id. Raises `SlotFull` if the slot is still at its max
-    once `wait` has elapsed (immediately, if `wait` is 0 -- the default).
+    Returns the lease id, or None when `cancel_wait` asks it to stop. Raises
+    `SlotFull` if the slot is still at its max once `wait` has elapsed.
     """
     root = _resolve_root(state_root)
     slot_dir = root / slot
     deadline = time.monotonic() + wait
     poll_interval = 0.2
     while True:
+        if cancel_wait is not None and cancel_wait():
+            return None
         lock_file = _with_slot_lock(slot_dir)
         try:
             max_n = _get_or_set_max(slot_dir, max_holders)
@@ -244,11 +248,15 @@ def hold(
     ttl: float = DEFAULT_TTL,
     max_holders: int | None = None,
     state_root: str | Path | None = None,
-) -> int:
+    before_run: Callable[[], bool] | None = None,
+) -> int | None:
     """Acquire (unless `lease` is already held), run `command`, renewing the
     lease while it runs, and release on exit -- success, failure, or the
     child being killed by a signal. Returns the child's exit code, or
     128 + signal number if it was killed by one (the usual shell convention).
+
+    If `before_run` returns False while waiting or after acquiring the lease,
+    `hold` releases any lease and returns `None` without running the command.
 
     Release always runs: it is in a `finally`, after `proc.wait()` returns --
     which it does even when the child was killed by SIGTERM or SIGKILL, since
@@ -271,9 +279,19 @@ def hold(
     if lease is None:
         if slot is None or holder is None:
             raise ValueError("hold needs either lease=, or slot= and holder=")
-        lease = acquire(
-            slot, holder, wait=wait, ttl=ttl, max_holders=max_holders, state_root=state_root
+        cancel_wait = (
+            (lambda: not before_run()) if before_run is not None else None
         )
+        lease = acquire(
+            slot, holder, wait=wait, ttl=ttl, max_holders=max_holders,
+            state_root=state_root, cancel_wait=cancel_wait,
+        )
+        if lease is None:
+            return None
+
+    if before_run is not None and not before_run():
+        release(lease, state_root=state_root)
+        return None
 
     return _lease_runtime.run_with_lease(
         command,

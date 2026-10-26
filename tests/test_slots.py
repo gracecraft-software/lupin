@@ -50,6 +50,28 @@ def test_acquire_wait_succeeds_once_a_holder_expires(tmp_path):
     assert elapsed < 3.0  # found room once the first holder's TTL passed, not by exhausting wait
 
 
+def test_acquire_cancels_wait_when_requested(tmp_path, monkeypatch):
+    root = str(tmp_path)
+    slots.acquire("bmo", "a", ttl=30, max_holders=1, state_root=root)
+    checks = 0
+    sleeps = []
+
+    def cancel_wait():
+        nonlocal checks
+        checks += 1
+        return checks == 2
+
+    monkeypatch.setattr(slots.time, "sleep", lambda delay: sleeps.append(delay))
+
+    assert slots.acquire(
+        "bmo", "b", wait=10, ttl=30, state_root=root, cancel_wait=cancel_wait,
+    ) is None
+
+    assert checks == 2
+    assert len(sleeps) == 1
+    assert slots.status(state_root=root)["bmo"]["holders"] == 1
+
+
 def test_release_frees_the_slot_and_is_idempotent(tmp_path):
     root = str(tmp_path)
     lease = slots.acquire("bmo", "a", max_holders=1, state_root=root)
