@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from importlib import resources
 from unittest import mock
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import pytest
 import redis as redis_lib
@@ -1169,7 +1169,7 @@ class ModelTiersRefreshBenchmarksRouteTests(unittest.TestCase):
         self.assertTrue(location.startswith("/model-tiers?sent="))
         self.assertIn("1%20models", location)
 
-    def test_refresh_benchmarks_not_live_redirects_with_stale_reason(self):
+    def test_refresh_benchmarks_not_live_redirects_with_neutral_message(self):
         handler = serve.Handler.__new__(serve.Handler)
         handler.path = "/model-tiers/refresh-benchmarks"
         handler.headers = {"Content-Length": "0"}
@@ -1178,14 +1178,21 @@ class ModelTiersRefreshBenchmarksRouteTests(unittest.TestCase):
         handler.send_response = mock.Mock()
         handler.send_header = mock.Mock()
         handler.end_headers = mock.Mock()
-        fake_snapshot = {"live": False, "stale_reason": "benchmark-fetch slot is held elsewhere"}
-        with mock.patch.object(serve.benchmark_fetch, "refresh_snapshot", return_value=fake_snapshot):
+        detail = "benchmark-fetch slot is held elsewhere\ninternal model detail"
+        fake_snapshot = {"live": False, "stale_reason": detail}
+        with (
+            mock.patch.object(serve.benchmark_fetch, "refresh_snapshot", return_value=fake_snapshot),
+            self.assertLogs(serve.__name__, level="WARNING") as logs,
+        ):
             handler.do_POST()
         location = next(
             call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
         )
-        self.assertIn("benchmark%20pull%20did%20not%20complete", location)
-        self.assertIn("held%20elsewhere", location)
+        self.assertEqual(
+            unquote(location.split("sent=", 1)[1]),
+            "Benchmark pull did not complete. Check the server logs for details.",
+        )
+        self.assertIn(detail, "\n".join(logs.output))
 
     def test_refresh_benchmarks_failure_redirects_with_message_not_a_500(self):
         handler = serve.Handler.__new__(serve.Handler)
@@ -1196,15 +1203,52 @@ class ModelTiersRefreshBenchmarksRouteTests(unittest.TestCase):
         handler.send_response = mock.Mock()
         handler.send_header = mock.Mock()
         handler.end_headers = mock.Mock()
-        with mock.patch.object(
-            serve.benchmark_fetch, "refresh_snapshot", side_effect=RuntimeError("redis down")
+        detail = "redis down\nprivate lookup setup detail"
+        with (
+            mock.patch.object(
+                serve.benchmark_fetch, "refresh_snapshot", side_effect=RuntimeError(detail)
+            ),
+            self.assertLogs(serve.__name__, level="WARNING") as logs,
         ):
             handler.do_POST()
         handler.send_response.assert_called_once_with(303)
         location = next(
             call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
         )
-        self.assertIn("pull%20failed%3A%20redis%20down", location)
+        self.assertEqual(
+            unquote(location.split("sent=", 1)[1]),
+            "Benchmark pull did not complete. Check the server logs for details.",
+        )
+        self.assertIn(detail, "\n".join(logs.output))
+
+    def test_refresh_benchmarks_auth_failure_redirects_with_neutral_message(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh-benchmarks"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        detail = "Redis refused the login. Check the configured credentials."
+        with (
+            mock.patch.object(
+                serve.benchmark_fetch,
+                "refresh_snapshot",
+                side_effect=serve.slots_redis.CoordinatorAuthFailed(detail),
+            ),
+            self.assertLogs(serve.__name__, level="WARNING") as logs,
+        ):
+            handler.do_POST()
+        handler.send_response.assert_called_once_with(303)
+        location = next(
+            call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
+        )
+        self.assertEqual(
+            unquote(location.split("sent=", 1)[1]),
+            "Benchmark pull did not complete. Check the server logs for details.",
+        )
+        self.assertIn(detail, "\n".join(logs.output))
 
 
 class RoadmapCliTests(unittest.TestCase):

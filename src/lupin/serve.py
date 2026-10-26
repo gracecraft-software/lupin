@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import html
 import ipaddress
+import logging
 import json
 import os
 import concurrent.futures
@@ -43,6 +44,8 @@ from .quota import (
     epoch_ms_to_local,
     quota_source_label,
 )
+
+logger = logging.getLogger(__name__)
 
 ATTACHMENT_ID = roadmap.ATTACHMENT_ID
 ATTACHMENT_REDIRECT_HOST = re.compile(
@@ -3789,19 +3792,24 @@ class Handler(BaseHTTPRequestHandler):
         reports whatever is cached instead of starting a second, paying
         dispatch. `refresh_snapshot` turns most failures (timed out, bad
         output, Redis unreachable) into a `live: False` result. A refused
-        login or an ACL denial raises instead, and the first except below
-        names it. The broad except is a last-resort guard.
+        login or an ACL denial raises instead. Failed pulls are logged, but
+        the page only gets a short status message. The broad except is a
+        last-resort guard.
         """
+        sent = "Benchmark pull did not complete. Check the server logs for details."
         try:
             data = benchmark_fetch.refresh_snapshot(force=True, **self.fleet_connection)
             if data.get("live"):
                 sent = f"pulled today's benchmark scores ({len(data.get('scores', []))} models)"
             else:
-                sent = f"benchmark pull did not complete: {data.get('stale_reason', 'unknown reason')}"
+                logger.warning(
+                    "benchmark refresh did not complete: %s",
+                    data.get("stale_reason", "unknown reason"),
+                )
         except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
-            sent = slots_redis.refusal_message(exc, "the benchmark refresh", fleet=True)
+            logger.warning("benchmark refresh was denied: %s", exc)
         except Exception as exc:  # best-effort by design, see docstring above
-            sent = f"pull failed: {exc}"
+            logger.warning("benchmark refresh failed: %s: %s", type(exc).__name__, exc)
         self.redirect(f"/model-tiers?sent={quote(sent, safe='')}")
 
     def do_loops(self, query: dict) -> None:
