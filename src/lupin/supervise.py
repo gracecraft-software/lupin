@@ -1,10 +1,12 @@
 """`lupin supervise`: check the loops on this machine with fixed rules.
 
-No model runs. For each Lupin loop, it reads the Herdr state, the systemd
-unit, the last pane lines and the newest handoff. It gives each loop one
-verdict (see `verdict`). It sends a fixed nudge to an idle loop with
-`herdr agent prompt`. It writes one `supervise` ledger event per repo.
+No model runs. Hand-started Herdr agents are listed as unsupervised, with no
+verdict, nudge, or ledger event. For each Lupin-owned loop, it reads the Herdr
+state, the systemd unit, the last pane lines and the newest handoff. It gives
+each loop one verdict (see `verdict`). It sends a fixed nudge to an idle loop
+with `herdr agent prompt`. It writes one `supervise` ledger event per repo.
 It writes the nudge, the ledger event, its own state file and lock file.
+
 The read functions that it uses also write: `loop_runtime.local_loops` can
 update a loop's metadata file (`needs_attention` when its Herdr workspace is
 gone), `roadmap` writes its cache file (`lupin/cache.json`), and the shared
@@ -296,7 +298,10 @@ def run_pass(
         repos[base] = {"name": full_name, "work_left": work[base], "event": event, "ledger": written}
 
     report = {
-        "loops": [{k: v for k, v in row.items() if k != "base"} for row in rows],
+        "loops": [
+            {k: v for k, v in row.items() if k != "base"}
+            for row in rows
+        ],
         "repos": repos,
         # Unknown work counts as work, so the supervisor does not stop too early.
         "work_left": any(value != 0 for value in work.values()),
@@ -308,15 +313,21 @@ def run_pass(
 
 
 def _print_text(report: dict) -> None:
-    if not report["loops"]:
+    loops = report["loops"]
+    unsupervised = report.get("unsupervised", [])
+    if not loops and not unsupervised:
         print(report["note"])
         return
-    for row in report["loops"]:
+    for row in loops:
         reason = f" reason={row['reason']}" if "reason" in row else ""
         print(
             f"{row['repo']}: state={row['state']} unit={row['unit']} "
             f"verdict={row['verdict']} nudge={row['nudge']}{reason}"
         )
+    for row in unsupervised:
+        pane = row.get("pane_id") or "unknown"
+        repo = row.get("repo") or "unknown"
+        print(f"{repo}: pane={pane} state={row['state']} unsupervised")
     for base, value in report["repos"].items():
         print(f"{base}: {value['event']['status']}, ledger {value['ledger']}")
 
@@ -339,6 +350,7 @@ def supervise(
     sleep: Callable[[float], None] = time.sleep,
     emit: Callable[[dict], None] = _print_text,
     lock_pass: Callable[[Path], Callable[[], None] | None] = _lock_pass,
+    list_unowned: Callable[[], list[dict]] | None = None,
     **sources,
 ) -> int:
     """Run one pass, or one pass every `every` seconds until no work is left.
@@ -356,6 +368,9 @@ def supervise(
                 return 0
         try:
             report = run_pass(**sources)
+            report["unsupervised"] = list_unowned() if list_unowned else []
+            if report["unsupervised"]:
+                report.pop("note", None)
         finally:
             if release:
                 release()
@@ -380,34 +395,83 @@ def _unit_state(repo: str) -> str:
     return output.strip() or "unknown"
 
 
-def _list_loops() -> list[dict]:
-    """The Lupin loops that `local_loops` finds, with their own Herdr state.
+def _list_unowned_agents() -> list[dict]:
+    """List Herdr agents without a pane owned by live Lupin metadata."""
+    try:
+        agents = loop_runtime._agents(loop_runtime.SESSION_NAME)
+    except loop_runtime.LoopError:
+        return []
 
-    `local_loops` also lists other Herdr agents in a repo. Those are skipped.
-    The state is the Herdr state of the loop's own pane.
-    """
+    owned_panes = set()
+    for path in loop_runtime.LOOPS_DIR.glob("*.json"):
+        try:
+            metadata = loop_runtime._read_metadata(path.stem)
+        except loop_runtime.LoopError:
+            continue
+        pane_id = metadata.get("pane_id") if metadata else None
+        if (
+            metadata
+            and metadata.get("state") in _LIVE
+            and metadata.get("session") == loop_runtime.SESSION_NAME
+            and isinstance(pane_id, str)
+            and pane_id
+        ):
+            owned_panes.add(pane_id)
+
+    rows = []
+    seen = set()
+    for agent in agents:
+        if not isinstance(agent, dict) or agent.get("pane_id") in owned_panes:
+            continue
+        row = {
+            "repo": loop_runtime._agent_repo(agent),
+            "session": loop_runtime.SESSION_NAME,
+            "state": agent.get("agent_status") or "unknown",
+            "pane_id": agent.get("pane_id"),
+            "workspace_id": agent.get("workspace_id"),
+            "agent": agent.get("agent"),
+            "unsupervised": True,
+        }
+        identity = (row["pane_id"], row["workspace_id"], row["agent"])
+        if identity not in seen:
+            seen.add(identity)
+            rows.append(row)
+    return rows
+
+
+def _list_loops() -> list[dict]:
+    """Return only loops with live Lupin metadata and a recorded Herdr pane."""
     try:
         rows = loop_runtime.local_loops()
     except loop_runtime.LoopError:
         return []
+
     loops = []
     for row in rows:
         repo = row.get("repo")
+        if not isinstance(repo, str):
+            continue
         try:
             metadata = loop_runtime._read_metadata(repo)
         except loop_runtime.LoopError:
             continue
-        if not metadata or metadata.get("state") not in _LIVE:
+        pane_id = metadata.get("pane_id") if metadata else None
+        if (
+            not metadata
+            or metadata.get("state") not in _LIVE
+            or not isinstance(pane_id, str)
+            or not pane_id
+        ):
             continue
-        pane_id = row.get("pane_id")
         own = next(
-            (p for p in row.get("panes", []) if pane_id and p.get("pane_id") == pane_id),
+            (
+                pane for pane in row.get("panes", [])
+                if isinstance(pane, dict) and pane.get("pane_id") == pane_id
+            ),
             None,
         )
-        # Not `row["state"]`: `local_loops` sets that from all agents of the repo.
         state = own.get("agent_status", "unknown") if own else "unknown"
         if metadata.get("state") == "needs_attention":
-            # Lupin's own state. Herdr does not report it.
             state = "needs_attention"
         loops.append({
             "repo": repo,
@@ -579,9 +643,10 @@ def _append_event(connection: dict, full_name: str, event: dict) -> None:
 
 
 def real_sources(connection: dict) -> dict:
-    """The sources that `run_pass` uses on a real machine."""
+    """The sources used by `supervise` on a real machine."""
     return dict(
         list_loops=_list_loops,
+        list_unowned=_list_unowned_agents,
         read_pane=_read_pane,
         read_handoff=_read_handoff,
         repo_name=_repo_name,

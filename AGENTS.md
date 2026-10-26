@@ -189,11 +189,13 @@ first is unset. Each file name is the worker name. Each worker runs `lupin
 agent` with its key. The command queues runs. It does not wait for them to
 start.
 
-`supervise` checks this machine's loops with fixed rules. It uses no model. For
-each loop, it reads the Herdr state of the pane and the Lupin loop state. It
-also reads the systemd unit, the last 20 pane lines, and the newest handoff from
-this run. If Herdr does not list the loop's own pane, the Herdr state is
-`unknown`. The first rule that matches gives the verdict:
+`supervise` checks Lupin-owned loops with fixed rules. It uses no model. It
+lists hand-started Herdr agents as `unsupervised`; they get no verdict, nudge,
+or ledger event. For each Lupin-owned loop, it reads the Herdr state of the
+pane and the Lupin loop state. It also reads the systemd unit, the last 20 pane
+lines, and the newest handoff from this run. If Herdr does not list the loop's
+own pane, the Herdr state is `unknown`. The first rule that matches gives the
+verdict:
 
 1. `stopped`, reason "waiting for the owner". Herdr says `blocked`, or the Lupin
    state is `needs_attention`. The loop is flagged. No nudge.

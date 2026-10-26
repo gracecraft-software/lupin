@@ -220,7 +220,10 @@ def test_lupin_needs_attention_wins_over_a_working_pane(monkeypatch):
     }])
     monkeypatch.setattr(
         supervise.loop_runtime, "_read_metadata",
-        lambda repo: {"repo": repo, "state": "needs_attention", "started_at": "2026-10-19T00:00:00Z"},
+        lambda repo: {
+            "repo": repo, "state": "needs_attention", "pane_id": "w1:p1",
+            "started_at": "2026-10-19T00:00:00Z",
+        },
     )
     monkeypatch.setattr(supervise, "_unit_state", lambda repo: "active")
 
@@ -434,11 +437,7 @@ def test_other_claim_errors_make_work_unknown(monkeypatch):
 
 
 def test_loop_whose_own_pane_is_not_listed_has_unknown_state(tmp_path, monkeypatch):
-    """Real `local_loops` and `_list_loops`, only Herdr faked.
-
-    The loop runs in an old per-repo session and its own agent works. Another
-    agent of the same repo is `done` in the shared session.
-    """
+    """A hand-started pane stays separate from the managed loop report."""
     lr = supervise.loop_runtime
     code = tmp_path / "code"
     loops_dir = tmp_path / "herdr-loops"
@@ -466,15 +465,22 @@ def test_loop_whose_own_pane_is_not_listed_has_unknown_state(tmp_path, monkeypat
     )
     monkeypatch.setattr(supervise, "_unit_state", lambda repo: "active")
 
-    loops = supervise._list_loops()
-    assert [loop["state"] for loop in loops] == ["unknown"]
+    managed = supervise._list_loops()
+    unowned = supervise._list_unowned_agents()
+    assert [loop["state"] for loop in managed] == ["unknown"]
+    assert [(loop["repo"], loop["state"]) for loop in unowned] == [("widgets", "done")]
 
-    fakes = Fakes(tmp_path, loops)
+    fakes = Fakes(tmp_path, managed)
     fakes.metadata = {"widgets": meta}
-    report = supervise.run_pass(**fakes.kwargs())
+    reports = []
+    supervise.supervise(list_unowned=lambda: unowned, emit=reports.append, **fakes.kwargs())
 
+    report = reports[0]
     assert (report["loops"][0]["verdict"], report["loops"][0]["nudge"]) == ("ok", "none")
+    assert report["unsupervised"][0]["state"] == "done"
+    assert "state=done" not in repr(fakes.ledger[0][1]["highlights"])
     assert fakes.nudges == []
+    assert len(fakes.ledger) == 1
 
 
 def test_agent_that_started_work_before_the_send_is_stale(tmp_path):
@@ -553,7 +559,8 @@ _ALLOWED_IMPORTS = {
 # The only names that the module may use from each module.
 _ALLOWED_ATTRS = {
     "loop_runtime": {
-        "local_loops", "peek_loop", "_read_metadata", "_lock_file", "base_repo", "unit_name",
+        "local_loops", "_agents", "SESSION_NAME", "LOOPS_DIR", "_agent_repo",
+        "peek_loop", "_read_metadata", "_lock_file", "base_repo", "unit_name",
         "_run", "_herdr", "LoopError", "STATE_DIR", "CODE_DIR",
         "HERDR_TIMEOUT", "SYSTEMCTL_CHECK_TIMEOUT",
     },
@@ -690,3 +697,114 @@ def test_nudge_text_is_the_fixed_text():
 
 def test_module_runs_only_allowlisted_commands():
     check_only_allowlisted_commands(inspect.getsource(supervise))
+
+
+def test_hand_started_agent_is_unsupervised_and_not_supervised(
+    tmp_path, monkeypatch, capsys
+):
+    lr = supervise.loop_runtime
+    code = tmp_path / "code"
+    loops_dir = tmp_path / "herdr-loops"
+    loops_dir.mkdir()
+    monkeypatch.setattr(lr, "LOOPS_DIR", loops_dir)
+    monkeypatch.setattr(lr, "CODE_DIR", code)
+    # Matches PR #322: unmanaged agents are absent from local_loops().
+    monkeypatch.setattr(lr, "local_loops", lambda: [])
+    monkeypatch.setattr(
+        lr, "_agents",
+        lambda session: [{
+            "agent": "claude", "agent_status": "working", "cwd": str(code / "widgets"),
+            "pane_id": "w3N:p1", "workspace_id": "w3N",
+        }],
+    )
+    monkeypatch.setattr(supervise, "_unit_state", lambda repo: pytest.fail("unit read"))
+
+    assert supervise._list_loops() == []
+    [unowned] = supervise._list_unowned_agents()
+    assert unowned["repo"] == "widgets"
+    assert unowned["pane_id"] == "w3N:p1"
+    assert unowned["state"] == "working"
+
+    events = []
+    nudges = []
+    monkeypatch.setattr(supervise, "_append_event", lambda *args: events.append(args))
+    monkeypatch.setattr(supervise, "_send_nudge", lambda *args: nudges.append(args))
+    sources = supervise.real_sources({})
+    sources["state_path"] = tmp_path / "supervise.json"
+    reports = []
+    supervise.supervise(emit=reports.append, **sources)
+
+    report = reports[0]
+    assert report["loops"] == []
+    assert len(report["unsupervised"]) == 1
+    row = report["unsupervised"][0]
+    assert row["repo"] == "widgets"
+    assert row["pane_id"] == "w3N:p1"
+    assert row["state"] == "working"
+    assert "verdict" not in row
+    assert "nudge" not in row
+    assert report["repos"] == {}
+    assert nudges == []
+    assert events == []
+    supervise._print_text(report)
+    output = capsys.readouterr().out
+    assert "widgets: pane=w3N:p1 state=working unsupervised" in output
+    assert "verdict=" not in output
+    assert "nudge=" not in output
+
+
+def test_raw_agents_find_unowned_panes_when_local_loops_is_managed_only(
+    tmp_path, monkeypatch
+):
+    lr = supervise.loop_runtime
+    code = tmp_path / "code"
+    loops_dir = tmp_path / "herdr-loops"
+    loops_dir.mkdir()
+    monkeypatch.setattr(lr, "CODE_DIR", code)
+    monkeypatch.setattr(lr, "LOOPS_DIR", loops_dir)
+    panes = [
+        {"pane_id": "w1:p1", "agent_status": "working"},
+        {"pane_id": "w2:p1", "agent_status": "idle"},
+    ]
+    rows = [
+        {"repo": repo, "session": lr.SESSION_NAME, "panes": [pane]}
+        for repo, pane in (("widgets", panes[0]), ("widgets~2", panes[1]))
+    ]
+    metadata = {
+        "widgets": {
+            "repo": "widgets", "session": lr.SESSION_NAME, "state": "running",
+            "pane_id": "w1:p1",
+        },
+        "widgets~2": {
+            "repo": "widgets~2", "session": lr.SESSION_NAME, "state": "running",
+            "pane_id": "w2:p1",
+        },
+    }
+    for repo, value in metadata.items():
+        (loops_dir / f"{repo}.json").write_text(json.dumps(value), encoding="utf-8")
+    agents = [
+        {
+            "pane_id": pane["pane_id"], "workspace_id": pane["pane_id"].split(":")[0],
+            "agent_status": pane["agent_status"], "cwd": str(code / "widgets"),
+            "agent": "claude",
+        }
+        for pane in panes
+    ] + [{
+        "pane_id": "w3:p1", "workspace_id": "w3", "agent_status": "done",
+        "cwd": str(code / "widgets"), "agent": "claude",
+    }]
+    monkeypatch.setattr(lr, "local_loops", lambda: rows)
+    monkeypatch.setattr(lr, "_agents", lambda session: agents)
+    monkeypatch.setattr(lr, "_read_metadata", lambda repo: metadata[repo])
+    monkeypatch.setattr(supervise, "_unit_state", lambda repo: "active")
+
+    managed = supervise._list_loops()
+    unowned = supervise._list_unowned_agents()
+
+    assert [(loop["repo"], loop["pane_id"]) for loop in managed] == [
+        ("widgets", "w1:p1"), ("widgets~2", "w2:p1")
+    ]
+    assert [(loop["repo"], loop["pane_id"]) for loop in unowned] == [
+        ("widgets", "w3:p1")
+    ]
+    assert all("unsupervised" not in loop for loop in managed)
