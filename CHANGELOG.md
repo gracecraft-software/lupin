@@ -24,6 +24,8 @@ All notable changes to Lupin. The version has one source:
 
 ### Fixed
 
+- The one-off copy row keeps its status until the next input or click. A failed copy
+  tells the user to select the command and copy it manually.
 - The Roadmap page family uses one set of stage words (In progress, Ready,
   Later, Blocked) on the board, the list, the detail panel and the queue
   graph. The empty states keep the selected repositories visible, the note

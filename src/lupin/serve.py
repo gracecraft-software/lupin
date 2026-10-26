@@ -1140,15 +1140,19 @@ if(box){box.checked=localStorage.getItem("lupin-auto")==="1";
  setInterval(function(){if(box.checked&&!window.lupinUnsavedChanges())location.reload();},10000);}
 document.querySelectorAll("[data-once-repo]").forEach(function(row){
  var when=row.querySelector("input"),command=row.querySelector("code"),
-     status=row.querySelector("[data-copy-status]");
- function update(){command.textContent="lupin once "+when.value+" "+row.dataset.onceRepo;}
+     status=row.querySelector("[data-copy-status]"),interaction=0;
+ function update(){command.textContent="lupin once "+when.value+" "+row.dataset.onceRepo;row.title=command.textContent;status.textContent="";interaction++;}
  when.addEventListener("input",update);
  row.querySelector("button").addEventListener("click",function(){
+   status.textContent="";
+   var current=++interaction;
    Promise.resolve().then(function(){
      return navigator.clipboard.writeText(command.textContent);
-   }).then(function(){status.textContent="copied";},function(){
-     status.textContent="copy failed";
-   }).then(function(){setTimeout(function(){status.textContent="";},2000);});
+   }).then(function(){
+     if(current===interaction)status.textContent="copied";
+   },function(){
+     if(current===interaction)status.textContent="copy failed. Select the command and copy it manually.";
+   });
  });
 });
 var themeBtn=document.getElementById("theme-toggle");
@@ -1449,8 +1453,8 @@ def render_dashboard(state: dict) -> bytes:
             if r["state"] == "enabled":
                 command = f"lupin once now {r['repo']}"
                 once = (
-                    f"<span data-once-repo='{esc(r['repo'])}'>"
-                    f"<code>{esc(command)}</code> "
+                    f"<span data-once-repo='{esc(r['repo'])}' title='{esc(command)}'>"
+                    f"<code style='user-select:text'>{esc(command)}</code> "
                     "<label>when <input value=now aria-label='one-off loop time'></label> "
                     "<button type=button>copy</button> "
                     "<span class=dim data-copy-status aria-live=polite></span></span>"

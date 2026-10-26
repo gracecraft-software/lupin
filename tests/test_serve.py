@@ -175,6 +175,14 @@ class TimerTests(unittest.TestCase):
 
         self.assertIn("lupin once now repo-enabled", page)
         self.assertIn("data-once-repo='repo-enabled'", page)
+        self.assertIn(
+            "<span data-once-repo='repo-enabled' title='lupin once now repo-enabled'>",
+            page,
+        )
+        self.assertIn(
+            "<code style='user-select:text'>lupin once now repo-enabled</code>",
+            page,
+        )
         self.assertIn("<th>one-off command</th>", page)
         self.assertNotIn("data-once-repo='repo-disabled'", page)
         self.assertNotIn("data-once-repo='repo-no-doc'", page)
