@@ -124,7 +124,7 @@ def latest_snapshot(**connection) -> dict | None:
     Use the shared snapshot if neither timestamp is valid.
     """
     shared = read_shared_snapshot(**connection)
-    local = _read_local_snapshot()
+    local = _read_local_snapshot(SNAPSHOT_FILE)
     shared_time = _snapshot_time(shared)
     local_time = _snapshot_time(local)
 

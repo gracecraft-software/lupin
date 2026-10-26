@@ -1882,16 +1882,8 @@ _ALIAS_PREFIX = re.compile(r"^(?:bmo|local):|^(?:opencode-go|openai-codex|openai
 
 
 def load_model_snapshot(connection: dict | None = None) -> dict | None:
-    """Read the fleet snapshot, then this host's file as a fallback."""
-    shared = model_fetch.read_shared_snapshot(**(connection or {}))
-    if shared is not None:
-        return shared
-    try:
-        with open(model_fetch.SNAPSHOT_FILE, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+    """Return the newer fleet or local model snapshot."""
+    return model_fetch.latest_snapshot(**(connection or {}))
 
 
 def snapshot_models(snapshot: dict | None) -> list[dict]:
@@ -3773,7 +3765,29 @@ class Handler(BaseHTTPRequestHandler):
             snapshot = model_fetch.snapshot()
             model_fetch.save_snapshot(snapshot)
             shared = model_fetch.publish_snapshot(snapshot, **self.fleet_connection)
-            sent = "pulled today's model list and prices"
+            subscriptions = snapshot.get("subscriptions", {})
+            counts = {}
+            for model in snapshot_models(snapshot):
+                name = model["subscription"]
+                counts[name] = counts.get(name, 0) + 1
+            count_summary = ", ".join(
+                f"{name}: {counts.get(name, 0)}" for name in subscriptions
+            ) or "no subscriptions"
+            total = sum(counts.values())
+            if total:
+                sent = (
+                    "pulled today's model list and prices "
+                    f"({count_summary}; {total} models shown)"
+                )
+            else:
+                sent = f"no models returned ({count_summary}; 0 models shown)"
+            failures = [
+                f"{name}: {info.get('error') or info.get('stale_reason') or 'not refreshed'}"
+                for name, info in subscriptions.items()
+                if isinstance(info, dict) and not info.get("live")
+            ]
+            if failures:
+                sent += f"; subscriptions not refreshed: {', '.join(failures)}"
             if not shared:
                 sent += "; fleet cache unavailable, saved on this machine only"
         except Exception as exc:  # keep the dashboard usable if a pull or write fails

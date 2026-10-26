@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from importlib import resources
 from unittest import mock
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import pytest
 import redis as redis_lib
@@ -946,6 +946,7 @@ class AllModelsTableTests(unittest.TestCase):
         with (
             mock.patch.object(serve, "MODEL_TIERS_PATH", self.tiers_path),
             mock.patch.object(serve.model_fetch, "read_shared_snapshot", return_value=shared),
+            mock.patch.object(serve.model_fetch, "_read_local_snapshot", return_value=None),
             mock.patch.object(serve.benchmark_fetch, "read_snapshot", return_value=None),
         ):
             page = serve.render_model_tiers(connection={"redis_host": "fleet"}).decode()
@@ -1104,7 +1105,19 @@ class ModelTiersRefreshRouteTests(unittest.TestCase):
         handler.send_header = mock.Mock()
         handler.end_headers = mock.Mock()
         handler.fleet_connection = {"redis_host": "fleet"}
-        fake_snapshot = {"fetched_at": "2026-10-07T00:00:00+00:00", "subscriptions": {}}
+        fake_snapshot = {
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "claude-opus"}, {"id": "claude-sonnet"}],
+                },
+                "opencode-go": {
+                    "live": True,
+                    "models": [{"id": "opencode-model"}],
+                },
+            },
+        }
         with (
             mock.patch.object(serve.model_fetch, "snapshot", return_value=fake_snapshot) as fake_fetch,
             mock.patch.object(serve.model_fetch, "save_snapshot") as fake_save,
@@ -1118,8 +1131,110 @@ class ModelTiersRefreshRouteTests(unittest.TestCase):
         location = next(
             call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
         )
-        self.assertIn("pulled%20today%27s%20model%20list", location)
+        message = unquote(location.partition("sent=")[2])
         self.assertTrue(location.startswith("/model-tiers?sent="))
+        self.assertIn("pulled today's model list and prices", message)
+        self.assertIn("claude: 2, opencode-go: 1", message)
+        self.assertIn("3 models shown", message)
+
+    def test_refresh_publish_failure_renders_newer_local_snapshot(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        handler.fleet_connection = {"redis_host": "fleet"}
+        fresh_snapshot = {
+            "fetched_at": "2026-10-08T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "fresh-1"}, {"id": "fresh-2"}],
+                },
+            },
+        }
+        stale_shared_snapshot = {
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "old-1"}],
+                },
+            },
+        }
+        with (
+            mock.patch.object(serve.model_fetch, "snapshot", return_value=fresh_snapshot),
+            mock.patch.object(serve.model_fetch, "save_snapshot") as fake_save,
+            mock.patch.object(serve.model_fetch, "publish_snapshot", return_value=False) as fake_publish,
+            mock.patch.object(
+                serve.model_fetch, "read_shared_snapshot", return_value=stale_shared_snapshot
+            ),
+            mock.patch.object(serve.model_fetch, "_read_local_snapshot", return_value=fresh_snapshot),
+            mock.patch.object(serve.benchmark_fetch, "read_snapshot", return_value=None),
+        ):
+            handler.do_POST()
+            fake_save.assert_called_once_with(fresh_snapshot)
+            fake_publish.assert_called_once_with(fresh_snapshot, redis_host="fleet")
+            location = next(
+                call.args[1]
+                for call in handler.send_header.call_args_list
+                if call.args[0] == "Location"
+            )
+            message = unquote(location.partition("sent=")[2])
+            page = serve.render_model_tiers(
+                sent=message, connection=handler.fleet_connection
+            ).decode()
+        self.assertIn("claude: 2", message)
+        self.assertIn("2 models shown", message)
+        self.assertIn("fleet cache unavailable", message)
+        self.assertIn("fresh-1", page)
+        self.assertIn("fresh-2", page)
+        self.assertNotIn("old-1", page)
+
+    def test_refresh_with_no_models_reports_subscription_errors(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        handler.fleet_connection = {}
+        fake_snapshot = {
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": False,
+                    "error": "unavailable (FileNotFoundError)",
+                    "models": [],
+                },
+                "opencode-go": {
+                    "live": False,
+                    "error": "no OpenCode Go API key available",
+                    "models": [],
+                },
+            },
+        }
+        with (
+            mock.patch.object(serve.model_fetch, "snapshot", return_value=fake_snapshot),
+            mock.patch.object(serve.model_fetch, "save_snapshot"),
+            mock.patch.object(serve.model_fetch, "publish_snapshot", return_value=True),
+        ):
+            handler.do_POST()
+        location = next(
+            call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
+        )
+        message = unquote(location.partition("sent=")[2])
+        self.assertIn("no models returned", message)
+        self.assertIn("claude: 0, opencode-go: 0", message)
+        self.assertIn("0 models shown", message)
+        self.assertIn("claude: unavailable (FileNotFoundError)", message)
+        self.assertIn("opencode-go: no OpenCode Go API key available", message)
+        self.assertNotIn("pulled today's model list and prices", message)
 
     def test_refresh_failure_redirects_with_message_not_a_500(self):
         handler = serve.Handler.__new__(serve.Handler)

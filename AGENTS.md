@@ -122,7 +122,10 @@ Otherwise it uses models.dev and marks the rows `live: false`. Prices come from
 models.dev, matched by model ID. A model with no match has `price: null`.
 `promo` stays `null`. A failed fetch, for example from an expired OAuth token or
 a missing key, keeps the last verified list. It marks the list `live: false`
-with the reason. The Models page shows that reason under each row.
+with the reason. The Models page shows that reason under each row. Its "Pull
+models" status reports the model count for each subscription and names each
+subscription that did not refresh, with its reason. It says "no models returned"
+when the table has no model rows.
 
 `run <repo>` starts a Lupin worker and a Herdr workspace. The agent works in a
 new Git worktree (see "State"). `run --all` starts every enabled repo.
